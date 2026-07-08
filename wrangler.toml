@@ -2,6 +2,13 @@ name = "binnacle"
 main = "worker.ts"
 compatibility_date = "2024-12-01"
 
+# Routing, declared as code so the Git-connected build is authoritative
+# (the dashboard toggles lock out for git-deployed workers).
+workers_dev = true
+routes = [
+  { pattern = "binnacle.dort.zone", custom_domain = true },
+]
+
 # D1 database. Create it once with:
 #   npx wrangler@latest d1 create binnacle
 # then paste the returned database_id below (and commit it — it is not a secret).
