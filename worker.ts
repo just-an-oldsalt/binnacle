@@ -35,11 +35,27 @@ Two kinds of page content, pick per page:
 
 1. FULL ARTIFACT (preferred for anything rich — dashboards, trackers, showpieces): make
    content_html a COMPLETE HTML document (starts with <!doctype html> or <html>, with its own
-   <head>, <style>, fonts, and <script>). It renders ISOLATED in its own frame, so its styling
-   never clashes with anything else and you have total control. Inline <script> runs; use
-   localStorage for persistence (e.g. checklists, set logs). Load web fonts via <link>/@import.
-   Use links with normal hrefs to other pages (e.g. /parent/child) — they navigate the whole
-   reader automatically.
+   <head>, <style>, fonts, and <script>). It renders ISOLATED in a sandboxed frame, so its
+   styling never clashes with anything else and you have total control. Inline <script> runs.
+   Load web fonts via <link>/@import. Use links with normal hrefs to other pages (e.g.
+   /parent/child) — they navigate the whole reader automatically.
+
+   PERSISTENT + LOGGED STATE — do NOT use localStorage (blocked in the sandbox). Instead use
+   the injected window.bnc API for anything checkable/stateful (checklists, statuses, counters,
+   notes):
+     • window.bnc.state[key]         → current value (server-synced; survives reload; syncs
+                                        across devices). Read it on load to set control state.
+     • window.bnc.log(key, value, label) → record a change. Writes a TIMESTAMPED event to the
+                                        page's history and updates state[key]. 'label' is the
+                                        human description shown in the timeline.
+   One primitive covers every control: a checkbox logs true/false, a status cycle logs
+   "todo"/"doing"/"done", a counter logs a number, a note logs a string. Give each control a
+   stable unique key. Example:
+     const cb = document.querySelector('#buy-licence');
+     cb.checked = !!bnc.state['buy-licence'];
+     cb.addEventListener('change', () => bnc.log('buy-licence', cb.checked, 'Buy fishing licence'));
+   Every log() is visible in the page History and via the get_events tool, so an agent reads
+   the timestamped log of what was done rather than guessing from current state.
 
 2. QUICK FRAGMENT (fine for simple reference pages): a plain HTML fragment (no <html> wrapper)
    that inherits the reader's dark theme. Reusable classes available: .hero (+ h1, .sub),
@@ -416,6 +432,7 @@ async function tDeletePage(env: Env, args: any): Promise<ToolResult> {
 
   const placeholders = ids.map(() => "?").join(",");
   await env.DB.prepare(`DELETE FROM revisions WHERE page_id IN (${placeholders})`).bind(...ids).run();
+  await env.DB.prepare(`DELETE FROM events WHERE page_id IN (${placeholders})`).bind(...ids).run();
   await env.DB.prepare(`DELETE FROM pages WHERE id IN (${placeholders})`).bind(...ids).run();
   await ftsDelete(env, ids);
   return { deleted: ids.length };
@@ -604,7 +621,60 @@ const TOOLS: Array<{
     },
     handler: tSearch,
   },
+  {
+    name: "get_events",
+    description:
+      "Read the timestamped event log emitted by interactive artifacts (checkbox toggles, status changes, counters, notes). Pass `path` or `id` for one page's timeline; omit both for recent events across all pages. Each event is {key, value, label, at}. This is the source of truth for what was done and when — read it instead of inferring state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string" },
+        id: { type: "string" },
+        limit: { type: "number", description: "max events (default 50, max 200)" },
+      },
+    },
+    handler: tGetEvents,
+  },
 ];
+
+function safeParse(s: string): unknown {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+async function tGetEvents(env: Env, args: any): Promise<ToolResult> {
+  const limit = Math.min(Math.max(1, Number(args?.limit) || 50), 200);
+  if (args?.path || args?.id) {
+    let pid = args?.id as string | undefined;
+    if (!pid) {
+      const pg = resolvePath(await loadAllPages(env), String(args.path));
+      if (!pg) throw new Error("page not found");
+      pid = pg.id;
+    }
+    const { results } = await env.DB.prepare(
+      `SELECT key, value, label, created_at FROM events WHERE page_id = ? ORDER BY created_at DESC LIMIT ?`
+    )
+      .bind(pid, limit)
+      .all<{ key: string; value: string; label: string | null; created_at: string }>();
+    return {
+      events: (results ?? []).map((r) => ({ key: r.key, value: safeParse(r.value), label: r.label, at: r.created_at })),
+    };
+  }
+  const { results } = await env.DB.prepare(
+    `SELECT page_id, key, value, label, created_at FROM events ORDER BY created_at DESC LIMIT ?`
+  )
+    .bind(limit)
+    .all<{ page_id: string; key: string; value: string; label: string | null; created_at: string }>();
+  const { byId } = buildIndex(await loadAllPages(env));
+  return {
+    events: (results ?? []).map((r) => ({
+      path: byId.has(r.page_id) ? fullPath(byId, r.page_id) : null,
+      key: r.key,
+      value: safeParse(r.value),
+      label: r.label,
+      at: r.created_at,
+    })),
+  };
+}
 
 // ---------------------------------------------------------------------------
 // MCP (JSON-RPC over Streamable HTTP)
@@ -923,11 +993,15 @@ pre.diff ins{background:rgba(76,255,145,.18);color:var(--success);text-decoratio
 @media (max-width:720px){body{flex-direction:column}.sidebar{width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid var(--border)}.navwrap>summary{display:block;cursor:pointer;font-size:.9rem;color:var(--muted);padding:4px 0}.content{padding:24px 18px}}
 `;
 
-function pageShell(title: string, sidebar: string, main: string, nonce: string): string {
+function pageShell(title: string, sidebar: string, main: string, nonce: string, eventPath = ""): string {
   // The artifact iframe is isolated (sandboxed and/or cross-origin), so we can no
-  // longer read its document to size it. Instead the artifact posts its height and
-  // we listen for it — works across the origin boundary, matched by source window.
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main><script nonce="${nonce}">(function(){window.addEventListener('message',function(e){var d=e&&e.data;if(!d||typeof d.__bnc_h!=='number')return;document.querySelectorAll('iframe.artifact').forEach(function(f){if(f.contentWindow===e.source)f.style.height=(d.__bnc_h+2)+'px'})})})();</script></body></html>`;
+  // longer read its document to size it. Instead the artifact posts messages we
+  // listen for — matched by source window: __bnc_h (height) and __bnc_ev (a logged
+  // event). We're the authenticated party, so we relay events to POST /event.
+  const bridge = `(function(){var EP=${JSON.stringify(
+    eventPath
+  )};window.addEventListener('message',function(e){var d=e&&e.data;if(!d)return;var f=null;document.querySelectorAll('iframe.artifact').forEach(function(x){if(x.contentWindow===e.source)f=x});if(!f)return;if(typeof d.__bnc_h==='number'){f.style.height=(d.__bnc_h+2)+'px'}else if(d.__bnc_ev&&d.__bnc_ev.key&&EP){try{fetch('/event',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({path:EP,ev:d.__bnc_ev})})}catch(_){}}})})();`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main><script nonce="${nonce}">${bridge}</script></body></html>`;
 }
 
 // Render the reader shell with a fresh CSP nonce for its one inline script.
@@ -936,10 +1010,11 @@ function shellResponse(
   sidebar: string,
   main: string,
   status = 200,
-  rawOrigin?: string
+  rawOrigin?: string,
+  eventPath = ""
 ): Response {
   const nonce = randomToken(16);
-  return htmlResponse(pageShell(title, sidebar, main, nonce), status, {
+  return htmlResponse(pageShell(title, sidebar, main, nonce, eventPath), status, {
     "content-security-policy": readerCsp(nonce, rawOrigin),
   });
 }
@@ -1019,6 +1094,22 @@ async function recentActivity(env: Env) {
     `SELECT page_id, version, summary, created_at FROM revisions ORDER BY created_at DESC, version DESC LIMIT 50`
   ).all<{ page_id: string; version: number; summary: string | null; created_at: string }>();
   return results ?? [];
+}
+
+async function recentEvents(env: Env) {
+  const { results } = await env.DB.prepare(
+    `SELECT page_id, key, value, label, created_at FROM events ORDER BY created_at DESC LIMIT 50`
+  ).all<{ page_id: string; key: string; value: string; label: string | null; created_at: string }>();
+  return results ?? [];
+}
+
+// Short human phrase for an event value in the activity feed.
+function formatEventValue(v: unknown): string {
+  if (v === true) return "✓ checked";
+  if (v === false) return "✗ unchecked";
+  if (typeof v === "number") return "= " + v;
+  if (typeof v === "string") return v ? "→ " + v : "cleared";
+  return "· " + JSON.stringify(v);
 }
 
 // Word/tag-level LCS diff; escapes everything so it renders as safe source.
@@ -1146,15 +1237,45 @@ function isFullDoc(html: string): boolean {
 const ARTIFACT_REPORTER =
   `<script>(function(){function h(){try{var y=Math.max(document.documentElement.scrollHeight,(document.body||{}).scrollHeight||0);if(y)parent.postMessage({__bnc_h:y},'*')}catch(e){}}addEventListener('load',h);try{new ResizeObserver(h).observe(document.documentElement)}catch(e){}setTimeout(h,300);setTimeout(h,1200);setInterval(h,2000)})();</script>`;
 
-// Serve a page's raw document (for the artifact iframe). <base target="_top">
-// makes links inside navigate the whole reader, not just the frame. `frameAncestors`
-// restricts who may embed it (the reader origin only), and no script CSP is set so
-// the artifact keeps full control of its own JS.
-function rawArtifact(html: string, frameAncestors = "'self'"): Response {
+// Latest value per key for a page = its current interactive state. Never throws:
+// if the events table isn't there yet (migration not applied), artifacts still
+// render, just without restored state.
+async function loadState(env: Env, pageId: string): Promise<Record<string, unknown>> {
+  const st: Record<string, unknown> = {};
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT key, value FROM events WHERE page_id = ? ORDER BY created_at ASC`
+    )
+      .bind(pageId)
+      .all<{ key: string; value: string }>();
+    for (const r of results ?? []) {
+      try { st[r.key] = JSON.parse(r.value); } catch { st[r.key] = r.value; }
+    }
+  } catch {
+    /* events table not migrated yet — degrade to no state */
+  }
+  return st;
+}
+
+// Bootstrap injected into every artifact: window.bnc.state (current values,
+// server-synced, survives reload + syncs across devices) and window.bnc.log(key,
+// value, label) which posts a timestamped event up to the authenticated reader.
+// Artifacts use this instead of localStorage (blocked in the sandbox).
+function bncBootstrap(state: Record<string, unknown>): string {
+  const s = JSON.stringify(state).replace(/</g, "\\u003c");
+  return `<script>window.__BNC_STATE=${s};window.bnc={state:window.__BNC_STATE,log:function(k,v,l){k=String(k);try{parent.postMessage({__bnc_ev:{key:k,value:v,label:l==null?'':String(l)}},'*')}catch(e){}window.bnc.state[k]=v;return v}};</script>`;
+}
+
+// Serve a page's raw document (for the artifact iframe). Injects <base target="_top">
+// (links navigate the whole reader), the bnc bootstrap (state + event logging), and
+// the height reporter. `frameAncestors` restricts who may embed it; no script CSP is
+// set so the artifact keeps full control of its own JS.
+function rawArtifact(html: string, state: Record<string, unknown> = {}, frameAncestors = "'self'"): Response {
+  const head = '<base target="_top">' + bncBootstrap(state);
   let out = html;
-  if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => m + '<base target="_top">');
-  else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, (m) => m + '<head><base target="_top"></head>');
-  else out = '<base target="_top">' + out;
+  if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => m + head);
+  else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, (m) => m + `<head>${head}</head>`);
+  else out = head + out;
   if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, ARTIFACT_REPORTER + "</body>");
   else out = out + ARTIFACT_REPORTER;
   return new Response(out, {
@@ -1228,7 +1349,7 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
     // serve it here to keep the isolation boundary meaningful.
     if (sp.has("raw")) {
       if (env.RAW_ORIGIN) return new Response("Not Found", { status: 404 });
-      return rawArtifact(current.content_html);
+      return rawArtifact(current.content_html, await loadState(env, current.id));
     }
     const vParam = sp.get("v");
     const diffParam = sp.get("diff");
@@ -1245,7 +1366,14 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
     }
   }
 
-  return shellResponse(current?.title ?? "Home", renderSidebar(nav), main, 200, env.RAW_ORIGIN);
+  return shellResponse(
+    current?.title ?? "Home",
+    renderSidebar(nav),
+    main,
+    200,
+    env.RAW_ORIGIN,
+    current ? fullPath(byId, current.id) : ""
+  );
 }
 
 // Build the <iframe> that hosts a full-document artifact. Cross-origin (RAW_ORIGIN)
@@ -1259,6 +1387,34 @@ async function artifactIframe(env: Env, current: PageRow, cpath: string): Promis
     return `<iframe class="artifact" src="${esc(src)}" title="${title}"></iframe>`;
   }
   return `<iframe class="artifact" src="${esc(cpath)}?raw=1" sandbox="allow-scripts allow-popups allow-forms allow-top-navigation-by-user-activation" title="${title}"></iframe>`;
+}
+
+// Relayed by the authenticated reader when an artifact posts an event. Records a
+// timestamped {key, value, label} against the page. Requires a valid session.
+async function handleEvent(req: Request, env: Env): Promise<Response> {
+  if (!(await hasValidSession(req, env)))
+    return new Response("Forbidden", { status: 403, headers: SECURITY_HEADERS });
+  let body: any;
+  try { body = await req.json(); } catch { return json({ error: "bad json" }, 400); }
+  const ev = body?.ev;
+  const path = body?.path;
+  if (!ev || typeof ev.key !== "string" || typeof path !== "string")
+    return json({ error: "bad request" }, 400);
+  const page = resolvePath(await loadAllPages(env), path);
+  if (!page) return json({ error: "page not found" }, 404);
+  await env.DB.prepare(
+    `INSERT INTO events (id, page_id, key, value, label, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+  )
+    .bind(
+      crypto.randomUUID(),
+      page.id,
+      ev.key.slice(0, 200),
+      JSON.stringify(ev.value === undefined ? null : ev.value),
+      ev.label ? String(ev.label).slice(0, 300) : null,
+      now()
+    )
+    .run();
+  return json({ ok: true });
 }
 
 async function handleSearch(req: Request, env: Env, url: URL): Promise<Response> {
@@ -1307,22 +1463,39 @@ async function handleSearch(req: Request, env: Env, url: URL): Promise<Response>
 async function handleActivity(req: Request, env: Env, url: URL): Promise<Response> {
   if (!(await hasValidSession(req, env)))
     return Response.redirect(new URL("/login", url).toString(), 302);
-  const acts = await recentActivity(env);
+  const [acts, evs] = await Promise.all([recentActivity(env), recentEvents(env)]);
   const pages = await loadAllPages(env);
   const { byId, childrenOf } = buildIndex(pages);
   const nav = renderNav(childrenOf, byId, null, new Set(), null);
-  const items = acts
-    .filter((a) => byId.has(a.page_id))
-    .map((a) => {
-      const p = byId.get(a.page_id)!;
-      const path = fullPath(byId, p.id);
-      const when = esc(String(a.created_at).slice(0, 16).replace("T", " "));
-      return `<li><span class="badge">v${a.version}</span> ${when} · <a href="${esc(path)}">${esc(
+  const rows: { at: string; html: string }[] = [];
+  for (const a of acts) {
+    if (!byId.has(a.page_id)) continue;
+    const p = byId.get(a.page_id)!;
+    const path = fullPath(byId, p.id);
+    const when = esc(String(a.created_at).slice(0, 16).replace("T", " "));
+    rows.push({
+      at: a.created_at,
+      html: `<li><span class="badge">v${a.version}</span> ${when} · <a href="${esc(path)}">${esc(
         p.title
-      )}</a>${a.summary ? ` — ${esc(a.summary)}` : ""}</li>`;
-    })
-    .join("");
-  const main = `<div class="prose"><h1>Activity</h1><p class="muted">Recent edits across all pages. Each row is the version that was superseded.</p></div><ul class="history">${
+      )}</a>${a.summary ? ` — ${esc(a.summary)}` : ""}</li>`,
+    });
+  }
+  for (const e of evs) {
+    if (!byId.has(e.page_id)) continue;
+    const p = byId.get(e.page_id)!;
+    const path = fullPath(byId, p.id);
+    const when = esc(String(e.created_at).slice(0, 16).replace("T", " "));
+    const val = esc(formatEventValue(safeParse(e.value)));
+    rows.push({
+      at: e.created_at,
+      html: `<li><span class="badge">log</span> ${when} · <a href="${esc(path)}">${esc(p.title)}</a> — ${
+        e.label ? esc(e.label) + ": " : ""
+      }${val}</li>`,
+    });
+  }
+  rows.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  const items = rows.slice(0, 60).map((r) => r.html).join("");
+  const main = `<div class="prose"><h1>Activity</h1><p class="muted">Recent edits and logged events across all pages.</p></div><ul class="history">${
     items || '<li class="muted">No activity yet.</li>'
   }</ul>`;
   return shellResponse("Activity", renderSidebar(nav), main, 200, env.RAW_ORIGIN);
@@ -1435,7 +1608,7 @@ async function handleRawHost(req: Request, env: Env, url: URL): Promise<Response
     return new Response("Forbidden", { status: 403, headers: SECURITY_HEADERS });
   const page = resolvePath(await loadAllPages(env), path);
   if (!page) return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
-  return rawArtifact(page.content_html, env.READER_ORIGIN || "'self'");
+  return rawArtifact(page.content_html, await loadState(env, page.id), env.READER_ORIGIN || "'self'");
 }
 
 // Static bearer token (Claude Code) OR an OAuth access token (the apps).
@@ -1644,6 +1817,7 @@ export default {
     // Web reader
     if (p === "/login") return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
     if (p === "/logout") return handleLogout();
+    if (p === "/event" && req.method === "POST") return handleEvent(req, env);
     if (p === "/search") return handleSearch(req, env, url);
     if (p === "/activity") return handleActivity(req, env, url);
     return handleReader(req, env, url);
