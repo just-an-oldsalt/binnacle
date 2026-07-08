@@ -17,6 +17,33 @@ export interface Env {
 
 const MAX_REVISIONS = 20;
 const SERVER_INFO = { name: "binnacle", version: "0.1.0" };
+
+const BINNACLE_INSTRUCTIONS = `Binnacle is a tree wiki: a nested tree of pages, each page is raw HTML you author.
+
+DESIGN PHILOSOPHY — this is a tree of bespoke artifacts, NOT a uniform wiki. Do not force
+every page into one house style or make pages look the same. Design each page as the best
+self-contained artifact for its content, with full creative freedom (layout, fonts, colours,
+interactivity).
+
+Two kinds of page content, pick per page:
+
+1. FULL ARTIFACT (preferred for anything rich — dashboards, trackers, showpieces): make
+   content_html a COMPLETE HTML document (starts with <!doctype html> or <html>, with its own
+   <head>, <style>, fonts, and <script>). It renders ISOLATED in its own frame, so its styling
+   never clashes with anything else and you have total control. Inline <script> runs; use
+   localStorage for persistence (e.g. checklists, set logs). Load web fonts via <link>/@import.
+   Use links with normal hrefs to other pages (e.g. /parent/child) — they navigate the whole
+   reader automatically.
+
+2. QUICK FRAGMENT (fine for simple reference pages): a plain HTML fragment (no <html> wrapper)
+   that inherits the reader's dark theme. Reusable classes available: .hero (+ h1, .sub),
+   .lead, .chips/.chip, .stats/.stat (.n number, .l label), .callout with a variant
+   (info/tip/success/warn/danger) wrapping <span class="ico">emoji</span><div class="body">…,
+   .cards + <a class="card"> (.t title, .d desc), table.kv, ul.checklist (li.done = checked),
+   .tags/.tag, and .st status pills (ok/need/crit).
+
+Prefer a full bespoke artifact whenever a page would benefit from a distinct look or
+interactivity. Titles are plain text (no HTML). Keep slugs implicit — they derive from titles.`;
 const DEFAULT_PROTOCOL = "2024-11-05";
 
 // ---------------------------------------------------------------------------
@@ -465,7 +492,7 @@ const TOOLS: Array<{
   {
     name: "create_page",
     description:
-      "Create a page. `title` required. Optional `parent_id` (omit for top-level), `slug` (auto from title), `content_html` (raw HTML body fragment), `sort_order`.",
+      "Create a page. `title` required. Optional `parent_id` (omit for top-level), `slug` (auto from title), `sort_order`, and `content_html`. content_html is either a COMPLETE HTML document (<!doctype html>/<html> with its own <style>/fonts/<script>) — renders isolated as a bespoke artifact — OR a plain fragment that inherits the reader theme. Design each page freely; don't force a shared house style. Prefer a full self-contained artifact for anything rich or interactive.",
     inputSchema: {
       type: "object",
       required: ["title"],
@@ -482,7 +509,7 @@ const TOOLS: Array<{
   {
     name: "update_page",
     description:
-      "Update a page's `title` and/or `content_html`. The previous state is snapshotted to history. Pass a short `summary` describing the change.",
+      "Update a page's `title` and/or `content_html`. content_html may be a complete HTML document (renders isolated as a bespoke artifact) or a theme-inheriting fragment. The previous state is snapshotted to history. Pass a short `summary` describing the change.",
     inputSchema: {
       type: "object",
       required: ["id"],
@@ -579,6 +606,7 @@ async function handleRpc(env: Env, msg: any): Promise<object | null> {
           protocolVersion: params?.protocolVersion || DEFAULT_PROTOCOL,
           capabilities: { tools: {} },
           serverInfo: SERVER_INFO,
+          instructions: BINNACLE_INSTRUCTIONS,
         },
       };
 
@@ -820,6 +848,7 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.mu
 .prose .st.ok{color:var(--success);background:color-mix(in srgb,var(--success) 13%,transparent);border-color:color-mix(in srgb,var(--success) 30%,transparent)}
 .prose .st.need{color:var(--warn);background:color-mix(in srgb,var(--warn) 13%,transparent);border-color:color-mix(in srgb,var(--warn) 30%,transparent)}
 .prose .st.crit{color:var(--danger);background:color-mix(in srgb,var(--danger) 13%,transparent);border-color:color-mix(in srgb,var(--danger) 30%,transparent)}
+.artifact{width:100%;border:1px solid var(--border);border-radius:14px;display:block;min-height:70vh;background:var(--bg);color-scheme:light dark}
 
 .side-link{display:block;margin-top:14px;font-size:.85rem;color:var(--muted)}
 .rev-banner{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:.9rem;margin-bottom:22px}
@@ -840,7 +869,7 @@ pre.diff ins{background:rgba(76,255,145,.18);color:var(--success);text-decoratio
 `;
 
 function pageShell(title: string, sidebar: string, main: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main><script>(function(){function s(){document.querySelectorAll('iframe.artifact').forEach(function(f){try{var d=f.contentWindow.document,h=Math.max(d.documentElement.scrollHeight,(d.body||{}).scrollHeight||0);if(h)f.style.height=(h+2)+'px'}catch(e){}})}window.addEventListener('load',s);document.querySelectorAll('iframe.artifact').forEach(function(f){f.addEventListener('load',function(){s();try{new ResizeObserver(s).observe(f.contentWindow.document.documentElement)}catch(e){}});setTimeout(s,250);setTimeout(s,1200)})})();</script></body></html>`;
 }
 
 function renderNav(
@@ -1033,6 +1062,30 @@ async function renderDiffMain(
   return `${crumbs}${banner}<pre class="diff">${diffHtml(rev.content_html, current.content_html)}</pre>`;
 }
 
+// A page is a full self-contained artifact if its HTML is a complete document.
+// Those render isolated in an iframe so each page's own design fully controls it.
+function isFullDoc(html: string): boolean {
+  const s = html.slice(0, 400).toLowerCase();
+  return s.includes("<!doctype") || /<html[\s>]/.test(s);
+}
+
+// Serve a page's raw document (for the artifact iframe). <base target="_top">
+// makes links inside navigate the whole reader, not just the frame.
+function rawArtifact(html: string): Response {
+  let out = html;
+  if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => m + '<base target="_top">');
+  else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, (m) => m + '<head><base target="_top"></head>');
+  else out = '<base target="_top">' + out;
+  return new Response(out, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+function renderArtifactMain(byId: Map<string, PageRow>, current: PageRow, cpath: string): string {
+  const meta = `<footer class="meta">v${current.version} · updated ${esc(
+    current.updated_at.slice(0, 10)
+  )} · <a href="${esc(cpath)}?history=1">History</a></footer>`;
+  return `<nav class="crumbs">${breadcrumb(byId, current)}</nav><iframe class="artifact" src="${esc(cpath)}?raw=1" title="${esc(current.title)}"></iframe>${meta}`;
+}
+
 async function handleReader(req: Request, env: Env, url: URL): Promise<Response> {
   if (!(await hasValidSession(req, env)))
     return Response.redirect(new URL("/login", url).toString(), 302);
@@ -1079,6 +1132,7 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
   } else {
     const cpath = fullPath(byId, current.id);
     const sp = url.searchParams;
+    if (sp.has("raw")) return rawArtifact(current.content_html); // isolated artifact document
     const vParam = sp.get("v");
     const diffParam = sp.get("diff");
     if (vParam && Number.isFinite(Number(vParam))) {
@@ -1087,6 +1141,8 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
       main = await renderDiffMain(env, byId, current, cpath, Number(diffParam));
     } else if (sp.has("history")) {
       main = await renderHistoryMain(env, byId, current, cpath);
+    } else if (isFullDoc(current.content_html)) {
+      main = renderArtifactMain(byId, current, cpath);
     } else {
       main = renderPageMain(byId, childrenOf, current, cpath);
     }
