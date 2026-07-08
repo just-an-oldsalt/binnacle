@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Logs / OS
+.DS_Store
+*.log
+npm-debug.log*
+
+# Editor / env
+.vscode/
+.idea/
+.env
+.env.local
+
+# Wrangler local dev cache + secrets
+.wrangler/
+.dev.vars

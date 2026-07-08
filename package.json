@@ -1,0 +1,20 @@
+{
+  "name": "binnacle",
+  "version": "0.1.0",
+  "description": "Binnacle — a dead-simple tree wiki. Cloudflare Worker + D1, managed over MCP, read on the web.",
+  "private": true,
+  "scripts": {
+    "dev": "npx wrangler@latest dev",
+    "deploy": "echo 'Push to main — Cloudflare Workers Builds auto-deploys. CLI fallback: npx wrangler@latest deploy'",
+    "db:create": "npx wrangler@latest d1 create binnacle",
+    "db:migrate": "npx wrangler@latest d1 migrations apply binnacle --remote",
+    "db:migrate:local": "npx wrangler@latest d1 migrations apply binnacle --local",
+    "secret:token": "npx wrangler@latest secret put AUTH_TOKEN"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241205.0",
+    "typescript": "^5.7.2",
+    "wrangler": "^3.95.0"
+  }
+}

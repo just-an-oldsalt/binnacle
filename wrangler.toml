@@ -1,0 +1,19 @@
+name = "binnacle"
+main = "worker.ts"
+compatibility_date = "2024-12-01"
+
+# D1 database. Create it once with:
+#   npx wrangler@latest d1 create binnacle
+# then paste the returned database_id below (and commit it — it is not a secret).
+[[d1_databases]]
+binding = "DB"
+database_name = "binnacle"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
+
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+persist = true
+invocation_logs = true
