@@ -13,6 +13,12 @@
 export interface Env {
   DB: D1Database;
   AUTH_TOKEN: string;
+  // Optional: when set, full-document artifacts are served from (and embedded
+  // from) this separate origin, so their scripts run cross-origin to the reader
+  // — real isolation, and localStorage keeps working. Requires READER_ORIGIN too.
+  // When unset, artifacts render in a sandboxed same-origin iframe instead.
+  RAW_ORIGIN?: string;
+  READER_ORIGIN?: string;
 }
 
 const MAX_REVISIONS = 20;
@@ -80,7 +86,7 @@ function slugify(input: string): string {
 function json(data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json", ...CORS, ...extraHeaders },
+    headers: { "content-type": "application/json", ...CORS, ...SECURITY_HEADERS, ...extraHeaders },
   });
 }
 
@@ -104,11 +110,28 @@ function extractToken(req: Request, url: URL): string | null {
   return null;
 }
 
-// Constant-time-ish comparison.
+// Constant-time comparison of two equal-length strings (e.g. two HMAC hex
+// digests). Only safe when both operands are already fixed-length.
 function tokenMatches(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+// Timing-safe equality for a user-supplied secret vs. the real one. Comparing
+// SHA-256 digests keeps the compare constant-time AND leaks nothing about the
+// real token's length (both digests are always 32 bytes).
+async function digestEq(a: string, b: string): Promise<boolean> {
+  if (!a || !b) return false;
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest("SHA-256", te.encode(a)),
+    crypto.subtle.digest("SHA-256", te.encode(b)),
+  ]);
+  const ua = new Uint8Array(da);
+  const ub = new Uint8Array(db);
+  let diff = 0;
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
   return diff === 0;
 }
 
@@ -761,10 +784,42 @@ function esc(s: string): string {
   );
 }
 
+// Applied to every first-party response.
+const SECURITY_HEADERS: Record<string, string> = {
+  "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "no-referrer",
+};
+
+// Default CSP for script-free HTML (login, authorize, error, 404 chrome). The
+// reader shell overrides this with a nonce-based policy (see readerCsp).
+const DEFAULT_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+  "font-src https://fonts.gstatic.com data:; img-src 'self' data: https:; frame-src 'self'; connect-src 'self'; " +
+  "object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
+
+// The reader shell has exactly one inline <script> (iframe autosize), gated by a
+// per-response nonce so authored page content can never introduce executable JS.
+function readerCsp(nonce: string, rawOrigin?: string): string {
+  const frame = rawOrigin ? `'self' ${rawOrigin}` : "'self'";
+  return (
+    `default-src 'self'; script-src 'self' 'nonce-${nonce}'; ` +
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; " +
+    `img-src 'self' data: https:; frame-src ${frame}; connect-src 'self'; object-src 'none'; base-uri 'none'; ` +
+    "frame-ancestors 'none'; form-action 'self'"
+  );
+}
+
 function htmlResponse(body: string, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(body, {
     status,
-    headers: { "content-type": "text/html; charset=utf-8", ...headers },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      ...SECURITY_HEADERS,
+      "x-frame-options": "DENY",
+      "content-security-policy": DEFAULT_CSP,
+      ...headers,
+    },
   });
 }
 
@@ -868,8 +923,25 @@ pre.diff ins{background:rgba(76,255,145,.18);color:var(--success);text-decoratio
 @media (max-width:720px){body{flex-direction:column}.sidebar{width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid var(--border)}.navwrap>summary{display:block;cursor:pointer;font-size:.9rem;color:var(--muted);padding:4px 0}.content{padding:24px 18px}}
 `;
 
-function pageShell(title: string, sidebar: string, main: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main><script>(function(){function s(){document.querySelectorAll('iframe.artifact').forEach(function(f){try{var d=f.contentWindow.document,h=Math.max(d.documentElement.scrollHeight,(d.body||{}).scrollHeight||0);if(h)f.style.height=(h+2)+'px'}catch(e){}})}window.addEventListener('load',s);document.querySelectorAll('iframe.artifact').forEach(function(f){f.addEventListener('load',function(){s();try{new ResizeObserver(s).observe(f.contentWindow.document.documentElement)}catch(e){}});setTimeout(s,250);setTimeout(s,1200)})})();</script></body></html>`;
+function pageShell(title: string, sidebar: string, main: string, nonce: string): string {
+  // The artifact iframe is isolated (sandboxed and/or cross-origin), so we can no
+  // longer read its document to size it. Instead the artifact posts its height and
+  // we listen for it — works across the origin boundary, matched by source window.
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;600;700&display=swap" rel="stylesheet"><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main><script nonce="${nonce}">(function(){window.addEventListener('message',function(e){var d=e&&e.data;if(!d||typeof d.__bnc_h!=='number')return;document.querySelectorAll('iframe.artifact').forEach(function(f){if(f.contentWindow===e.source)f.style.height=(d.__bnc_h+2)+'px'})})})();</script></body></html>`;
+}
+
+// Render the reader shell with a fresh CSP nonce for its one inline script.
+function shellResponse(
+  title: string,
+  sidebar: string,
+  main: string,
+  status = 200,
+  rawOrigin?: string
+): Response {
+  const nonce = randomToken(16);
+  return htmlResponse(pageShell(title, sidebar, main, nonce), status, {
+    "content-security-policy": readerCsp(nonce, rawOrigin),
+  });
 }
 
 function renderNav(
@@ -1069,21 +1141,41 @@ function isFullDoc(html: string): boolean {
   return s.includes("<!doctype") || /<html[\s>]/.test(s);
 }
 
+// Injected into every raw artifact: reports its content height to the parent
+// reader so the (now isolated) iframe can be auto-sized without same-origin access.
+const ARTIFACT_REPORTER =
+  `<script>(function(){function h(){try{var y=Math.max(document.documentElement.scrollHeight,(document.body||{}).scrollHeight||0);if(y)parent.postMessage({__bnc_h:y},'*')}catch(e){}}addEventListener('load',h);try{new ResizeObserver(h).observe(document.documentElement)}catch(e){}setTimeout(h,300);setTimeout(h,1200);setInterval(h,2000)})();</script>`;
+
 // Serve a page's raw document (for the artifact iframe). <base target="_top">
-// makes links inside navigate the whole reader, not just the frame.
-function rawArtifact(html: string): Response {
+// makes links inside navigate the whole reader, not just the frame. `frameAncestors`
+// restricts who may embed it (the reader origin only), and no script CSP is set so
+// the artifact keeps full control of its own JS.
+function rawArtifact(html: string, frameAncestors = "'self'"): Response {
   let out = html;
   if (/<head[^>]*>/i.test(out)) out = out.replace(/<head[^>]*>/i, (m) => m + '<base target="_top">');
   else if (/<html[^>]*>/i.test(out)) out = out.replace(/<html[^>]*>/i, (m) => m + '<head><base target="_top"></head>');
   else out = '<base target="_top">' + out;
-  return new Response(out, { headers: { "content-type": "text/html; charset=utf-8" } });
+  if (/<\/body>/i.test(out)) out = out.replace(/<\/body>/i, ARTIFACT_REPORTER + "</body>");
+  else out = out + ARTIFACT_REPORTER;
+  return new Response(out, {
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "x-content-type-options": "nosniff",
+      "content-security-policy": `frame-ancestors ${frameAncestors}`,
+    },
+  });
 }
 
-function renderArtifactMain(byId: Map<string, PageRow>, current: PageRow, cpath: string): string {
+function renderArtifactMain(
+  byId: Map<string, PageRow>,
+  current: PageRow,
+  cpath: string,
+  iframeTag: string
+): string {
   const meta = `<footer class="meta">v${current.version} · updated ${esc(
     current.updated_at.slice(0, 10)
   )} · <a href="${esc(cpath)}?history=1">History</a></footer>`;
-  return `<nav class="crumbs">${breadcrumb(byId, current)}</nav><iframe class="artifact" src="${esc(cpath)}?raw=1" title="${esc(current.title)}"></iframe>${meta}`;
+  return `<nav class="crumbs">${breadcrumb(byId, current)}</nav>${iframeTag}${meta}`;
 }
 
 async function handleReader(req: Request, env: Env, url: URL): Promise<Response> {
@@ -1099,13 +1191,12 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
     current = resolvePath(pages, path);
     if (!current) {
       const nav = renderNav(childrenOf, byId, null, new Set(), null);
-      return htmlResponse(
-        pageShell(
-          "Not found",
-          renderSidebar(nav),
-          `<nav class="crumbs"><a href="/">Home</a></nav><div class="prose"><h1>Not found</h1><p class="muted">No page at <code>${esc(path)}</code>.</p></div>`
-        ),
-        404
+      return shellResponse(
+        "Not found",
+        renderSidebar(nav),
+        `<nav class="crumbs"><a href="/">Home</a></nav><div class="prose"><h1>Not found</h1><p class="muted">No page at <code>${esc(path)}</code>.</p></div>`,
+        404,
+        env.RAW_ORIGIN
       );
     }
   }
@@ -1132,7 +1223,13 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
   } else {
     const cpath = fullPath(byId, current.id);
     const sp = url.searchParams;
-    if (sp.has("raw")) return rawArtifact(current.content_html); // isolated artifact document
+    // Same-origin raw path (fallback mode only). When RAW_ORIGIN is configured
+    // the artifact is embedded from that separate origin instead, so refuse to
+    // serve it here to keep the isolation boundary meaningful.
+    if (sp.has("raw")) {
+      if (env.RAW_ORIGIN) return new Response("Not Found", { status: 404 });
+      return rawArtifact(current.content_html);
+    }
     const vParam = sp.get("v");
     const diffParam = sp.get("diff");
     if (vParam && Number.isFinite(Number(vParam))) {
@@ -1142,13 +1239,26 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
     } else if (sp.has("history")) {
       main = await renderHistoryMain(env, byId, current, cpath);
     } else if (isFullDoc(current.content_html)) {
-      main = renderArtifactMain(byId, current, cpath);
+      main = renderArtifactMain(byId, current, cpath, await artifactIframe(env, current, cpath));
     } else {
       main = renderPageMain(byId, childrenOf, current, cpath);
     }
   }
 
-  return htmlResponse(pageShell(current?.title ?? "Home", renderSidebar(nav), main));
+  return shellResponse(current?.title ?? "Home", renderSidebar(nav), main, 200, env.RAW_ORIGIN);
+}
+
+// Build the <iframe> that hosts a full-document artifact. Cross-origin (RAW_ORIGIN)
+// isolation keeps localStorage working; the same-origin fallback sandboxes the
+// frame (scripts run, but no same-origin access — localStorage is disabled).
+async function artifactIframe(env: Env, current: PageRow, cpath: string): Promise<string> {
+  const title = esc(current.title);
+  if (env.RAW_ORIGIN) {
+    const t = await makeRawToken(env, cpath);
+    const src = `${env.RAW_ORIGIN}${cpath}?raw=1&t=${encodeURIComponent(t)}`;
+    return `<iframe class="artifact" src="${esc(src)}" title="${title}"></iframe>`;
+  }
+  return `<iframe class="artifact" src="${esc(cpath)}?raw=1" sandbox="allow-scripts allow-popups allow-forms allow-top-navigation-by-user-activation" title="${title}"></iframe>`;
 }
 
 async function handleSearch(req: Request, env: Env, url: URL): Promise<Response> {
@@ -1191,7 +1301,7 @@ async function handleSearch(req: Request, env: Env, url: URL): Promise<Response>
     }</ul>`;
   }
 
-  return htmlResponse(pageShell("Search", renderSidebar(nav, q), main));
+  return shellResponse("Search", renderSidebar(nav, q), main, 200, env.RAW_ORIGIN);
 }
 
 async function handleActivity(req: Request, env: Env, url: URL): Promise<Response> {
@@ -1215,7 +1325,7 @@ async function handleActivity(req: Request, env: Env, url: URL): Promise<Respons
   const main = `<div class="prose"><h1>Activity</h1><p class="muted">Recent edits across all pages. Each row is the version that was superseded.</p></div><ul class="history">${
     items || '<li class="muted">No activity yet.</li>'
   }</ul>`;
-  return htmlResponse(pageShell("Activity", renderSidebar(nav), main));
+  return shellResponse("Activity", renderSidebar(nav), main, 200, env.RAW_ORIGIN);
 }
 
 function loginPage(error?: string): Response {
@@ -1231,7 +1341,7 @@ function loginPage(error?: string): Response {
 async function handleLoginPost(req: Request, env: Env): Promise<Response> {
   const form = await req.formData();
   const token = String(form.get("token") ?? "");
-  if (env.AUTH_TOKEN && token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN)) {
+  if (env.AUTH_TOKEN && (await digestEq(token, env.AUTH_TOKEN))) {
     return new Response(null, {
       status: 302,
       headers: { location: "/", "set-cookie": await makeSessionCookie(env) },
@@ -1271,7 +1381,7 @@ const OAUTH_CORS: Record<string, string> = {
 function ojson(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json", ...OAUTH_CORS },
+    headers: { "content-type": "application/json", ...OAUTH_CORS, ...SECURITY_HEADERS },
   });
 }
 
@@ -1301,10 +1411,37 @@ async function verifyOAuthToken(env: Env, kind: "at" | "rt", token: string | nul
   return tokenMatches(p[2], await hmacHex(env.AUTH_TOKEN, `${kind}.${exp}`));
 }
 
+// Short-lived, path-scoped token that lets the cross-origin RAW_ORIGIN host serve
+// one page's artifact without receiving the reader's session cookie. Only the
+// authenticated reader can mint these (it holds AUTH_TOKEN via the HMAC key).
+async function makeRawToken(env: Env, path: string): Promise<string> {
+  const exp = Date.now() + 24 * 3600 * 1000;
+  return `${exp}.${await hmacHex(env.AUTH_TOKEN, `raw.${path}.${exp}`)}`;
+}
+async function verifyRawToken(env: Env, path: string, token: string): Promise<boolean> {
+  const i = token.lastIndexOf(".");
+  if (i < 0) return false;
+  const exp = Number(token.slice(0, i));
+  if (!exp || exp < Date.now()) return false;
+  return tokenMatches(token.slice(i + 1), await hmacHex(env.AUTH_TOKEN, `raw.${path}.${exp}`));
+}
+
+// The RAW_ORIGIN host serves ONLY artifact documents, token-gated, embeddable
+// solely by the reader origin. It exposes no reader/OAuth/MCP surface.
+async function handleRawHost(req: Request, env: Env, url: URL): Promise<Response> {
+  const path = decodeURIComponent(url.pathname);
+  const token = url.searchParams.get("t") || "";
+  if (!(await verifyRawToken(env, path, token)))
+    return new Response("Forbidden", { status: 403, headers: SECURITY_HEADERS });
+  const page = resolvePath(await loadAllPages(env), path);
+  if (!page) return new Response("Not found", { status: 404, headers: SECURITY_HEADERS });
+  return rawArtifact(page.content_html, env.READER_ORIGIN || "'self'");
+}
+
 // Static bearer token (Claude Code) OR an OAuth access token (the apps).
 async function isAuthorizedMcp(env: Env, token: string | null): Promise<boolean> {
   if (!token || !env.AUTH_TOKEN) return false;
-  if (token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN)) return true;
+  if (await digestEq(token, env.AUTH_TOKEN)) return true;
   return verifyOAuthToken(env, "at", token);
 }
 
@@ -1388,9 +1525,16 @@ function renderAuthorizePage(q: URLSearchParams, appName: string, error?: string
   const hidden = ["response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope"]
     .map((k) => `<input type="hidden" name="${k}" value="${esc(q.get(k) || "")}">`)
     .join("");
+  // Show where the authorization will be sent so the token holder can spot a
+  // phishing client (open registration means any redirect_uri can be registered).
+  let dest = "";
+  try { dest = new URL(q.get("redirect_uri") || "").host; } catch {}
+  const destLine = `<p class="muted" style="margin-top:14px">On approval you'll be redirected to <strong style="color:var(--fg)">${esc(
+    dest || "an unrecognised address"
+  )}</strong>. Only continue if you started this connection and trust that destination.</p>`;
   const body = `<div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="muted">${esc(
     appName
-  )} wants to connect to your wiki. Enter your access token to allow it.</p><form method="post" action="/authorize">${hidden}<input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Allow access</button></form>${
+  )} wants to connect to your wiki. Enter your access token to allow it.</p>${destLine}<form method="post" action="/authorize">${hidden}<input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Allow access</button></form>${
     error ? `<p class="err">${esc(error)}</p>` : ""
   }</div></div>`;
   return htmlResponse(
@@ -1425,7 +1569,7 @@ async function handleAuthorizePost(req: Request, env: Env): Promise<Response> {
   if (err) return oauthErrorPage(err);
 
   const token = String(form.get("token") || "");
-  if (!(env.AUTH_TOKEN && token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN))) {
+  if (!(env.AUTH_TOKEN && (await digestEq(token, env.AUTH_TOKEN)))) {
     const client = await getOAuthClient(env, q.get("client_id") || "");
     return renderAuthorizePage(q, client?.client_name || "An application", "Incorrect token.");
   }
@@ -1482,6 +1626,10 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const p = url.pathname;
+
+    // Isolated artifact origin: serves only token-gated artifact documents.
+    if (env.RAW_ORIGIN && url.origin === env.RAW_ORIGIN) return handleRawHost(req, env, url);
+
     if (p === "/mcp") return handleMcp(req, env, url);
     if (p === "/health") return json({ ok: true, service: SERVER_INFO });
 

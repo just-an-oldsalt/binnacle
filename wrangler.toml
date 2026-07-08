@@ -17,6 +17,21 @@ binding = "DB"
 database_name = "binnacle"
 database_id = "45d1f082-5f10-4a88-90c0-c35b8aa24fda"
 
+# --- Optional: isolate full-document artifacts on a separate origin -----------
+# By default, artifacts render in a sandboxed same-origin iframe (their scripts
+# run, but localStorage is disabled and they cannot touch the reader). To restore
+# localStorage-backed persistence AND keep real isolation, serve artifacts from a
+# sibling subdomain so they run cross-origin to the reader:
+#   1. Add the custom-domain route (provisions DNS + cert on deploy):
+# [[routes]]
+# pattern = "raw.binnacle.dort.zone"
+# custom_domain = true
+#   2. Point the worker at both origins:
+# [vars]
+# RAW_ORIGIN = "https://raw.binnacle.dort.zone"
+# READER_ORIGIN = "https://binnacle.dort.zone"
+# ------------------------------------------------------------------------------
+
 [observability]
 enabled = true
 
