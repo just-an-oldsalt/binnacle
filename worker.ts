@@ -593,17 +593,256 @@ async function handleMcp(req: Request, env: Env, url: URL): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
-// Reader (stub — Phase 2)
+// Reader — cookie auth
 // ---------------------------------------------------------------------------
 
-function readerStub(): Response {
-  return new Response(
-    `<!doctype html><meta charset="utf-8"><title>Binnacle</title>
-     <body style="font-family:system-ui;max-width:40rem;margin:4rem auto;padding:0 1rem;color:#222">
-     <h1>🧭 Binnacle</h1>
-     <p>The MCP is live at <code>/mcp</code>. The web reader lands in Phase 2.</p>`,
-    { headers: { "content-type": "text/html; charset=utf-8" } }
+const COOKIE_NAME = "bnc_session";
+const COOKIE_MAX_AGE = 90 * 24 * 3600; // 90 days
+const te = new TextEncoder();
+
+function toHex(buf: ArrayBuffer): string {
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function hmacHex(secret: string, msg: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    te.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
   );
+  const sig = await crypto.subtle.sign("HMAC", key, te.encode(msg));
+  return toHex(sig);
+}
+
+async function makeSessionCookie(env: Env): Promise<string> {
+  const exp = Date.now() + COOKIE_MAX_AGE * 1000;
+  const sig = await hmacHex(env.AUTH_TOKEN, String(exp));
+  return `${COOKIE_NAME}=${exp}.${sig}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${COOKIE_MAX_AGE}`;
+}
+
+function readCookie(req: Request, name: string): string | null {
+  const raw = req.headers.get("cookie");
+  if (!raw) return null;
+  for (const part of raw.split(/;\s*/)) {
+    const i = part.indexOf("=");
+    if (i > 0 && part.slice(0, i) === name) return part.slice(i + 1);
+  }
+  return null;
+}
+
+async function hasValidSession(req: Request, env: Env): Promise<boolean> {
+  const c = readCookie(req, COOKIE_NAME);
+  if (!c) return false;
+  const dot = c.lastIndexOf(".");
+  if (dot < 0) return false;
+  const exp = c.slice(0, dot);
+  const sig = c.slice(dot + 1);
+  const expNum = Number(exp);
+  if (!expNum || expNum < Date.now()) return false;
+  return tokenMatches(sig, await hmacHex(env.AUTH_TOKEN, exp));
+}
+
+// ---------------------------------------------------------------------------
+// Reader — rendering
+// ---------------------------------------------------------------------------
+
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]!)
+  );
+}
+
+function htmlResponse(body: string, status = 200, headers: Record<string, string> = {}): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/html; charset=utf-8", ...headers },
+  });
+}
+
+const CSS = `
+:root{--bg:#fff;--fg:#1a1a1a;--muted:#6b7280;--border:#e5e7eb;--sidebar-bg:#fafafa;--accent:#2563eb;--code-bg:#f3f4f6}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e5e7eb;--muted:#9ca3af;--border:#242832;--sidebar-bg:#0b0d11;--accent:#7aa2f7;--code-bg:#1a1d24}}
+*{box-sizing:border-box}html,body{margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--fg);display:flex;min-height:100vh;line-height:1.6;-webkit-font-smoothing:antialiased}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.muted{color:var(--muted)}
+.sidebar{width:272px;flex-shrink:0;background:var(--sidebar-bg);border-right:1px solid var(--border);padding:20px 16px;position:sticky;top:0;height:100vh;overflow-y:auto}
+.brand{display:block;font-weight:600;font-size:1.05rem;color:var(--fg);margin-bottom:16px}.brand:hover{text-decoration:none}
+.navwrap>summary{display:none}
+.tree ul{list-style:none;margin:0;padding-left:14px}.tree>nav>ul,.tree>ul{padding-left:0}.tree li{margin:1px 0}
+.nav-link{display:block;padding:3px 8px;border-radius:6px;color:var(--fg);font-size:.92rem}
+.nav-link:hover{background:var(--code-bg);text-decoration:none}.nav-link.active{background:var(--accent);color:#fff;font-weight:500}
+.tree details>summary{list-style:none;cursor:pointer;display:flex;align-items:center}
+.tree details>summary::-webkit-details-marker{display:none}
+.tree details>summary::before{content:"\\25B8";color:var(--muted);font-size:.7rem;margin-right:2px;transition:transform .1s;display:inline-block;width:12px}
+.tree details[open]>summary::before{transform:rotate(90deg)}
+.tree details>summary .nav-link{flex:1}
+.logout{display:block;margin-top:20px;font-size:.85rem;color:var(--muted)}
+.content{flex:1;min-width:0;display:flex;justify-content:center;padding:40px 32px}
+.content article{width:100%;max-width:760px}
+.crumbs{font-size:.85rem;color:var(--muted);margin-bottom:20px}.crumbs a{color:var(--muted)}.crumbs .sep{margin:0 6px;opacity:.5}
+.prose{font-size:1rem}
+.prose h1{font-size:1.9rem;line-height:1.2;margin:.2em 0 .6em}
+.prose h2{font-size:1.4rem;margin:1.6em 0 .5em;padding-bottom:.2em;border-bottom:1px solid var(--border)}
+.prose h3{font-size:1.15rem;margin:1.4em 0 .4em}
+.prose p{margin:.8em 0}.prose ul,.prose ol{padding-left:1.4em;margin:.8em 0}.prose li{margin:.25em 0}
+.prose code{background:var(--code-bg);padding:.15em .4em;border-radius:4px;font-size:.88em;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.prose pre{background:var(--code-bg);padding:14px 16px;border-radius:8px;overflow-x:auto;margin:1em 0}.prose pre code{background:none;padding:0}
+.prose blockquote{margin:1em 0;padding:.4em 1em;border-left:3px solid var(--border);color:var(--muted)}
+.prose table{border-collapse:collapse;width:100%;margin:1em 0;font-size:.92rem;display:block;overflow-x:auto}
+.prose th,.prose td{border:1px solid var(--border);padding:7px 11px;text-align:left}.prose th{background:var(--code-bg)}
+.prose img{max-width:100%;height:auto}.prose a{text-decoration:underline}.prose hr{border:none;border-top:1px solid var(--border);margin:2em 0}
+.index{list-style:none;padding-left:0}.index li{margin:.4em 0}.index a{font-weight:500}
+.meta{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);font-size:.82rem;color:var(--muted)}
+.login-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
+.login-card{width:100%;max-width:360px;text-align:center}.login-card h1{font-size:1.5rem;margin-bottom:8px}
+.login-card form{margin-top:20px;display:flex;flex-direction:column;gap:12px}
+.login-card input{padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);font-size:1rem}
+.login-card button{padding:10px 12px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-size:1rem;font-weight:500;cursor:pointer}
+.login-card .err{color:#dc2626;font-size:.9rem;margin-top:10px}
+@media (max-width:720px){body{flex-direction:column}.sidebar{width:auto;height:auto;position:static;border-right:none;border-bottom:1px solid var(--border)}.navwrap>summary{display:block;cursor:pointer;font-size:.9rem;color:var(--muted);padding:4px 0}.content{padding:24px 18px}}
+`;
+
+function pageShell(title: string, sidebar: string, main: string): string {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${esc(title)} · Binnacle</title><style>${CSS}</style></head><body><aside class="sidebar">${sidebar}</aside><main class="content"><article>${main}</article></main></body></html>`;
+}
+
+function renderNav(
+  childrenOf: Map<string | null, PageRow[]>,
+  byId: Map<string, PageRow>,
+  parentId: string | null,
+  activeIds: Set<string>,
+  currentId: string | null
+): string {
+  const kids = childrenOf.get(parentId) ?? [];
+  if (!kids.length) return "";
+  let out = "<ul>";
+  for (const p of kids) {
+    const path = fullPath(byId, p.id);
+    const cls = p.id === currentId ? "nav-link active" : "nav-link";
+    const link = `<a class="${cls}" href="${esc(path)}">${esc(p.title)}</a>`;
+    if ((childrenOf.get(p.id) ?? []).length) {
+      const open = activeIds.has(p.id) ? " open" : "";
+      out += `<li><details${open}><summary>${link}</summary>${renderNav(childrenOf, byId, p.id, activeIds, currentId)}</details></li>`;
+    } else {
+      out += `<li>${link}</li>`;
+    }
+  }
+  return out + "</ul>";
+}
+
+function renderSidebar(navHtml: string): string {
+  return `<a class="brand" href="/">🧭 Binnacle</a><details class="navwrap" open><summary>Pages</summary><nav class="tree">${navHtml || '<p class="muted">No pages yet</p>'}</nav></details><a class="logout" href="/logout">Log out</a>`;
+}
+
+function breadcrumb(byId: Map<string, PageRow>, current: PageRow): string {
+  const chain: PageRow[] = [];
+  let c: PageRow | null = current;
+  while (c) {
+    chain.unshift(c);
+    c = c.parent_id ? byId.get(c.parent_id) ?? null : null;
+  }
+  const parts = chain.map((p, i) =>
+    i === chain.length - 1
+      ? `<span>${esc(p.title)}</span>`
+      : `<a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a>`
+  );
+  return `<a href="/">Home</a><span class="sep">/</span>` + parts.join('<span class="sep">/</span>');
+}
+
+async function handleReader(req: Request, env: Env, url: URL): Promise<Response> {
+  if (!(await hasValidSession(req, env)))
+    return Response.redirect(new URL("/login", url).toString(), 302);
+
+  const pages = await loadAllPages(env);
+  const { byId, childrenOf } = buildIndex(pages);
+  const path = decodeURIComponent(url.pathname);
+
+  let current: PageRow | null = null;
+  if (path !== "/") {
+    current = resolvePath(pages, path);
+    if (!current) {
+      const nav = renderNav(childrenOf, byId, null, new Set(), null);
+      return htmlResponse(
+        pageShell(
+          "Not found",
+          renderSidebar(nav),
+          `<nav class="crumbs"><a href="/">Home</a></nav><div class="prose"><h1>Not found</h1><p class="muted">No page at <code>${esc(path)}</code>.</p></div>`
+        ),
+        404
+      );
+    }
+  }
+
+  const activeIds = new Set<string>();
+  if (current) {
+    let c: PageRow | null = current;
+    while (c) {
+      activeIds.add(c.id);
+      c = c.parent_id ? byId.get(c.parent_id) ?? null : null;
+    }
+  }
+  const nav = renderNav(childrenOf, byId, null, activeIds, current?.id ?? null);
+
+  let main: string;
+  if (!current) {
+    const roots = childrenOf.get(null) ?? [];
+    const list = roots.length
+      ? `<ul class="index">${roots
+          .map((p) => `<li><a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a></li>`)
+          .join("")}</ul>`
+      : `<p class="muted">No pages yet — create one with the MCP.</p>`;
+    main = `<nav class="crumbs"><span>Home</span></nav><div class="prose"><h1>🧭 Binnacle</h1><p class="muted">A tree wiki. Pick a page from the sidebar.</p></div>${list}`;
+  } else {
+    const kids = childrenOf.get(current.id) ?? [];
+    let inner: string;
+    if (current.content_html.trim()) {
+      inner = `<div class="prose">${current.content_html}</div>`;
+    } else if (kids.length) {
+      inner = `<div class="prose"><p class="muted">This section has no content of its own.</p><ul class="index">${kids
+        .map((p) => `<li><a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a></li>`)
+        .join("")}</ul></div>`;
+    } else {
+      inner = `<div class="prose"><p class="muted">This page is empty.</p></div>`;
+    }
+    const meta = `<footer class="meta">v${current.version} · updated ${esc(current.updated_at.slice(0, 10))}</footer>`;
+    main = `<nav class="crumbs">${breadcrumb(byId, current)}</nav>${inner}${meta}`;
+  }
+
+  return htmlResponse(pageShell(current?.title ?? "Home", renderSidebar(nav), main));
+}
+
+function loginPage(error?: string): Response {
+  const body = `<div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="muted">Enter your access token</p><form method="post" action="/login"><input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Enter</button></form>${
+    error ? `<p class="err">${esc(error)}</p>` : ""
+  }</div></div>`;
+  return htmlResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in · Binnacle</title><style>${CSS}</style></head><body>${body}</body></html>`,
+    error ? 401 : 200
+  );
+}
+
+async function handleLoginPost(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const token = String(form.get("token") ?? "");
+  if (env.AUTH_TOKEN && token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN)) {
+    return new Response(null, {
+      status: 302,
+      headers: { location: "/", "set-cookie": await makeSessionCookie(env) },
+    });
+  }
+  return loginPage("Incorrect token.");
+}
+
+function handleLogout(): Response {
+  return new Response(null, {
+    status: 302,
+    headers: {
+      location: "/login",
+      "set-cookie": `${COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0`,
+    },
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +854,9 @@ export default {
     const url = new URL(req.url);
     if (url.pathname === "/mcp") return handleMcp(req, env, url);
     if (url.pathname === "/health") return json({ ok: true, service: SERVER_INFO });
-    return readerStub();
+    if (url.pathname === "/login")
+      return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
+    if (url.pathname === "/logout") return handleLogout();
+    return handleReader(req, env, url);
   },
 };
