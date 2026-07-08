@@ -160,6 +160,30 @@ function subtreeIds(childrenOf: Map<string | null, PageRow[]>, rootId: string): 
   return out;
 }
 
+// --- full-text search index maintenance -----------------------------------
+
+function stripHtml(s: string): string {
+  return s
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function ftsUpsert(env: Env, id: string, title: string, contentHtml: string): Promise<void> {
+  await env.DB.prepare(`DELETE FROM pages_fts WHERE page_id = ?`).bind(id).run();
+  await env.DB
+    .prepare(`INSERT INTO pages_fts (page_id, title, body) VALUES (?, ?, ?)`)
+    .bind(id, title, stripHtml(contentHtml))
+    .run();
+}
+
+async function ftsDelete(env: Env, ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const ph = ids.map(() => "?").join(",");
+  await env.DB.prepare(`DELETE FROM pages_fts WHERE page_id IN (${ph})`).bind(...ids).run();
+}
+
 async function uniqueSlug(
   env: Env,
   parentId: string | null,
@@ -242,6 +266,7 @@ async function tCreatePage(env: Env, args: any): Promise<ToolResult> {
   )
     .bind(id, parentId, slug, args.title, args.content_html ?? "", args.sort_order ?? 0, ts, ts)
     .run();
+  await ftsUpsert(env, id, args.title, args.content_html ?? "");
   const { byId } = buildIndex(await loadAllPages(env));
   return { id, path: fullPath(byId, id), title: args.title, version: 1 };
 }
@@ -293,6 +318,13 @@ async function tUpdatePage(env: Env, args: any): Promise<ToolResult> {
     .bind(page.id, page.id, MAX_REVISIONS)
     .run();
 
+  await ftsUpsert(
+    env,
+    page.id,
+    changingTitle ? args.title : page.title,
+    changingContent ? args.content_html : page.content_html
+  );
+
   const { byId } = buildIndex(await loadAllPages(env));
   return { id: page.id, path: fullPath(byId, page.id), version: newVersion };
 }
@@ -335,6 +367,7 @@ async function tDeletePage(env: Env, args: any): Promise<ToolResult> {
   const placeholders = ids.map(() => "?").join(",");
   await env.DB.prepare(`DELETE FROM revisions WHERE page_id IN (${placeholders})`).bind(...ids).run();
   await env.DB.prepare(`DELETE FROM pages WHERE id IN (${placeholders})`).bind(...ids).run();
+  await ftsDelete(env, ids);
   return { deleted: ids.length };
 }
 
@@ -364,6 +397,34 @@ async function tRestoreRevision(env: Env, args: any): Promise<ToolResult> {
     content_html: rev.content_html,
     summary: `restored from v${args.version}`,
   });
+}
+
+// Turn free text into a safe FTS5 prefix-AND match string ("foo bar" -> foo* bar*).
+function ftsQuery(raw: string): string {
+  const terms = (raw.toLowerCase().match(/[a-z0-9]+/g) ?? []).map((t) => `${t}*`);
+  return terms.join(" ");
+}
+
+async function tSearch(env: Env, args: any): Promise<ToolResult> {
+  const match = ftsQuery(String(args?.query ?? ""));
+  if (!match) return { results: [] };
+  const { results } = await env.DB.prepare(
+    `SELECT page_id, title, snippet(pages_fts, 1, '', '', '…', 15) AS snip
+     FROM pages_fts WHERE pages_fts MATCH ? ORDER BY rank LIMIT 30`
+  )
+    .bind(match)
+    .all<{ page_id: string; title: string; snip: string }>();
+  const { byId } = buildIndex(await loadAllPages(env));
+  return {
+    results: (results ?? [])
+      .filter((r) => byId.has(r.page_id))
+      .map((r) => ({
+        id: r.page_id,
+        title: r.title,
+        path: fullPath(byId, r.page_id),
+        snippet: r.snip,
+      })),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +542,17 @@ const TOOLS: Array<{
       properties: { id: { type: "string" }, version: { type: "number" } },
     },
     handler: tRestoreRevision,
+  },
+  {
+    name: "search",
+    description:
+      "Full-text search page titles and body. Returns matches with id, title, path, and a text snippet. Multiple words are ANDed (prefix-matched).",
+    inputSchema: {
+      type: "object",
+      required: ["query"],
+      properties: { query: { type: "string" } },
+    },
+    handler: tSearch,
   },
 ];
 
@@ -695,6 +767,13 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.mu
 .prose img{max-width:100%;height:auto}.prose a{text-decoration:underline}.prose hr{border:none;border-top:1px solid var(--border);margin:2em 0}
 .index{list-style:none;padding-left:0}.index li{margin:.4em 0}.index a{font-weight:500}
 .meta{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);font-size:.82rem;color:var(--muted)}
+.search{margin-bottom:14px}
+.search input{width:100%;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--fg);font-size:.9rem}
+.results{list-style:none;padding-left:0}.results li{margin:0 0 20px}
+.results>li>a{font-weight:600;font-size:1.05rem}
+.results .crumb-sm{font-size:.78rem;color:var(--muted);margin:2px 0}
+.results .snip{margin:.3em 0 0;font-size:.92rem;color:var(--fg)}
+.results mark{background:var(--accent);color:#fff;padding:0 2px;border-radius:3px}
 .login-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
 .login-card{width:100%;max-width:360px;text-align:center}.login-card h1{font-size:1.5rem;margin-bottom:8px}
 .login-card form{margin-top:20px;display:flex;flex-direction:column;gap:12px}
@@ -732,8 +811,8 @@ function renderNav(
   return out + "</ul>";
 }
 
-function renderSidebar(navHtml: string): string {
-  return `<a class="brand" href="/">🧭 Binnacle</a><details class="navwrap" open><summary>Pages</summary><nav class="tree">${navHtml || '<p class="muted">No pages yet</p>'}</nav></details><a class="logout" href="/logout">Log out</a>`;
+function renderSidebar(navHtml: string, query = ""): string {
+  return `<a class="brand" href="/">🧭 Binnacle</a><form class="search" action="/search" method="get"><input type="search" name="q" placeholder="Search…" value="${esc(query)}" aria-label="Search"></form><details class="navwrap" open><summary>Pages</summary><nav class="tree">${navHtml || '<p class="muted">No pages yet</p>'}</nav></details><a class="logout" href="/logout">Log out</a>`;
 }
 
 function breadcrumb(byId: Map<string, PageRow>, current: PageRow): string {
@@ -813,6 +892,49 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
   return htmlResponse(pageShell(current?.title ?? "Home", renderSidebar(nav), main));
 }
 
+async function handleSearch(req: Request, env: Env, url: URL): Promise<Response> {
+  if (!(await hasValidSession(req, env)))
+    return Response.redirect(new URL("/login", url).toString(), 302);
+
+  const q = (url.searchParams.get("q") ?? "").trim();
+  const pages = await loadAllPages(env);
+  const { byId, childrenOf } = buildIndex(pages);
+  const nav = renderNav(childrenOf, byId, null, new Set(), null);
+  const match = ftsQuery(q);
+
+  let main: string;
+  if (!q) {
+    main = `<div class="prose"><h1>Search</h1><p class="muted">Type a query in the box above.</p></div>`;
+  } else if (!match) {
+    main = `<div class="prose"><h1>Search</h1><p class="muted">No searchable terms in “${esc(q)}”.</p></div>`;
+  } else {
+    //  /  delimit highlights; we escape the snippet then swap them for <mark>.
+    const query = await env.DB.prepare(
+      `SELECT page_id, title, snippet(pages_fts, 1, char(1), char(2), '…', 16) AS snip
+       FROM pages_fts WHERE pages_fts MATCH ? ORDER BY rank LIMIT 40`
+    )
+      .bind(match)
+      .all<{ page_id: string; title: string; snip: string }>();
+    const rows = (query.results ?? []).filter((r) => byId.has(r.page_id));
+    const items = rows
+      .map((r) => {
+        const path = fullPath(byId, r.page_id);
+        const snip = esc(String(r.snip ?? ""))
+          .replaceAll("", "<mark>")
+          .replaceAll("", "</mark>");
+        return `<li><a href="${esc(path)}">${esc(r.title)}</a><div class="crumb-sm">${esc(path)}</div><p class="snip">${snip}</p></li>`;
+      })
+      .join("");
+    main = `<div class="prose"><h1>Search</h1><p class="muted">${rows.length} result${
+      rows.length === 1 ? "" : "s"
+    } for “${esc(q)}”.</p></div><ul class="results">${
+      items || '<li class="muted">Nothing found.</li>'
+    }</ul>`;
+  }
+
+  return htmlResponse(pageShell("Search", renderSidebar(nav, q), main));
+}
+
 function loginPage(error?: string): Response {
   const body = `<div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="muted">Enter your access token</p><form method="post" action="/login"><input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Enter</button></form>${
     error ? `<p class="err">${esc(error)}</p>` : ""
@@ -857,6 +979,7 @@ export default {
     if (url.pathname === "/login")
       return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
     if (url.pathname === "/logout") return handleLogout();
+    if (url.pathname === "/search") return handleSearch(req, env, url);
     return handleReader(req, env, url);
   },
 };
