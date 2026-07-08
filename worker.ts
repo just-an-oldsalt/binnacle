@@ -640,8 +640,15 @@ async function handleMcp(req: Request, env: Env, url: URL): Promise<Response> {
     return new Response("Method Not Allowed", { status: 405, headers: CORS });
 
   const token = extractToken(req, url);
-  if (!token || !env.AUTH_TOKEN || !tokenMatches(token, env.AUTH_TOKEN))
-    return json(rpcError(null, -32001, "unauthorized"), 401);
+  if (!(await isAuthorizedMcp(env, token)))
+    return new Response(JSON.stringify(rpcError(null, -32001, "unauthorized")), {
+      status: 401,
+      headers: {
+        "content-type": "application/json",
+        ...CORS,
+        "www-authenticate": `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+      },
+    });
 
   let body: any;
   try {
@@ -1148,19 +1155,253 @@ function handleLogout(): Response {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth 2.1 authorization server
+//
+// Lets the Claude mobile app / claude.ai connect Binnacle as a Connector. It's
+// fully self-contained — the "login" credential is AUTH_TOKEN. Access/refresh
+// tokens are self-verifying HMACs (no token storage); only registered clients
+// and one-time PKCE auth codes live in D1.
+// ---------------------------------------------------------------------------
+
+const ACCESS_TTL = 90 * 24 * 3600; // 90 days
+const REFRESH_TTL = 365 * 24 * 3600; // 1 year
+const CODE_TTL = 600; // 10 minutes
+
+const OAUTH_CORS: Record<string, string> = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET, POST, OPTIONS",
+  "access-control-allow-headers": "content-type, authorization",
+};
+function ojson(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json", ...OAUTH_CORS },
+  });
+}
+
+function b64url(buf: ArrayBuffer): string {
+  const s = btoa(String.fromCharCode(...new Uint8Array(buf)));
+  return s.replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function randomToken(bytes = 32): string {
+  const b = new Uint8Array(bytes);
+  crypto.getRandomValues(b);
+  return b64url(b.buffer);
+}
+async function sha256b64url(s: string): Promise<string> {
+  return b64url(await crypto.subtle.digest("SHA-256", te.encode(s)));
+}
+
+async function makeOAuthToken(env: Env, kind: "at" | "rt", ttlSec: number): Promise<string> {
+  const exp = Date.now() + ttlSec * 1000;
+  return `${kind}.${exp}.${await hmacHex(env.AUTH_TOKEN, `${kind}.${exp}`)}`;
+}
+async function verifyOAuthToken(env: Env, kind: "at" | "rt", token: string | null): Promise<boolean> {
+  if (!token) return false;
+  const p = token.split(".");
+  if (p.length !== 3 || p[0] !== kind) return false;
+  const exp = Number(p[1]);
+  if (!exp || exp < Date.now()) return false;
+  return tokenMatches(p[2], await hmacHex(env.AUTH_TOKEN, `${kind}.${exp}`));
+}
+
+// Static bearer token (Claude Code) OR an OAuth access token (the apps).
+async function isAuthorizedMcp(env: Env, token: string | null): Promise<boolean> {
+  if (!token || !env.AUTH_TOKEN) return false;
+  if (token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN)) return true;
+  return verifyOAuthToken(env, "at", token);
+}
+
+async function issueTokens(env: Env) {
+  return {
+    access_token: await makeOAuthToken(env, "at", ACCESS_TTL),
+    token_type: "Bearer",
+    expires_in: ACCESS_TTL,
+    refresh_token: await makeOAuthToken(env, "rt", REFRESH_TTL),
+    scope: "mcp",
+  };
+}
+
+function oauthASMetadata(origin: string) {
+  return {
+    issuer: origin,
+    authorization_endpoint: `${origin}/authorize`,
+    token_endpoint: `${origin}/token`,
+    registration_endpoint: `${origin}/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["none"],
+    scopes_supported: ["mcp"],
+  };
+}
+function oauthPRMetadata(origin: string) {
+  return { resource: `${origin}/mcp`, authorization_servers: [origin] };
+}
+
+async function getOAuthClient(env: Env, clientId: string) {
+  return await env.DB.prepare(
+    `SELECT client_id, redirect_uris, client_name FROM oauth_clients WHERE client_id = ?`
+  )
+    .bind(clientId)
+    .first<{ client_id: string; redirect_uris: string; client_name: string | null }>();
+}
+
+async function handleRegister(req: Request, env: Env): Promise<Response> {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: OAUTH_CORS });
+  let body: any = {};
+  try { body = await req.json(); } catch {}
+  const redirectUris: string[] = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
+  if (!redirectUris.length)
+    return ojson({ error: "invalid_client_metadata", error_description: "redirect_uris required" }, 400);
+  const clientId = "client_" + randomToken(12);
+  const name = typeof body.client_name === "string" ? body.client_name : null;
+  await env.DB.prepare(
+    `INSERT INTO oauth_clients (client_id, redirect_uris, client_name) VALUES (?, ?, ?)`
+  )
+    .bind(clientId, JSON.stringify(redirectUris), name)
+    .run();
+  return ojson(
+    {
+      client_id: clientId,
+      redirect_uris: redirectUris,
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      client_name: name,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+    },
+    201
+  );
+}
+
+// Returns an error string, or null if the request is valid.
+async function validateAuthzRequest(env: Env, q: URLSearchParams): Promise<string | null> {
+  if (q.get("response_type") !== "code") return "response_type must be 'code'";
+  if (q.get("code_challenge_method") !== "S256") return "PKCE with S256 is required";
+  if (!q.get("code_challenge")) return "code_challenge is required";
+  const client = await getOAuthClient(env, q.get("client_id") || "");
+  if (!client) return "unknown client_id";
+  let uris: string[] = [];
+  try { uris = JSON.parse(client.redirect_uris); } catch {}
+  if (!uris.includes(q.get("redirect_uri") || "")) return "redirect_uri is not registered";
+  return null;
+}
+
+function renderAuthorizePage(q: URLSearchParams, appName: string, error?: string): Response {
+  const hidden = ["response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope"]
+    .map((k) => `<input type="hidden" name="${k}" value="${esc(q.get(k) || "")}">`)
+    .join("");
+  const body = `<div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="muted">${esc(
+    appName
+  )} wants to connect to your wiki. Enter your access token to allow it.</p><form method="post" action="/authorize">${hidden}<input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Allow access</button></form>${
+    error ? `<p class="err">${esc(error)}</p>` : ""
+  }</div></div>`;
+  return htmlResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorize · Binnacle</title><style>${CSS}</style></head><body>${body}</body></html>`,
+    error ? 401 : 200
+  );
+}
+
+function oauthErrorPage(msg: string): Response {
+  return htmlResponse(
+    `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorization error · Binnacle</title><style>${CSS}</style></head><body><div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="err">Authorization error: ${esc(
+      msg
+    )}</p></div></div></body></html>`,
+    400
+  );
+}
+
+async function handleAuthorizeGet(req: Request, env: Env, url: URL): Promise<Response> {
+  const q = url.searchParams;
+  const err = await validateAuthzRequest(env, q);
+  if (err) return oauthErrorPage(err);
+  const client = await getOAuthClient(env, q.get("client_id") || "");
+  return renderAuthorizePage(q, client?.client_name || "An application");
+}
+
+async function handleAuthorizePost(req: Request, env: Env): Promise<Response> {
+  const form = await req.formData();
+  const q = new URLSearchParams();
+  for (const k of ["response_type", "client_id", "redirect_uri", "code_challenge", "code_challenge_method", "state", "scope"])
+    q.set(k, String(form.get(k) || ""));
+  const err = await validateAuthzRequest(env, q);
+  if (err) return oauthErrorPage(err);
+
+  const token = String(form.get("token") || "");
+  if (!(env.AUTH_TOKEN && token.length === env.AUTH_TOKEN.length && tokenMatches(token, env.AUTH_TOKEN))) {
+    const client = await getOAuthClient(env, q.get("client_id") || "");
+    return renderAuthorizePage(q, client?.client_name || "An application", "Incorrect token.");
+  }
+
+  const code = randomToken(24);
+  await env.DB.prepare(
+    `INSERT INTO oauth_codes (code, client_id, redirect_uri, code_challenge, expires_at) VALUES (?, ?, ?, ?, ?)`
+  )
+    .bind(code, q.get("client_id"), q.get("redirect_uri"), q.get("code_challenge"), Date.now() + CODE_TTL * 1000)
+    .run();
+
+  const redirect = new URL(q.get("redirect_uri")!);
+  redirect.searchParams.set("code", code);
+  if (q.get("state")) redirect.searchParams.set("state", q.get("state")!);
+  return new Response(null, { status: 302, headers: { location: redirect.toString() } });
+}
+
+async function handleToken(req: Request, env: Env): Promise<Response> {
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: OAUTH_CORS });
+  const form = await req.formData();
+  const grant = String(form.get("grant_type") || "");
+
+  if (grant === "authorization_code") {
+    const code = String(form.get("code") || "");
+    const row = await env.DB.prepare(
+      `SELECT client_id, redirect_uri, code_challenge, expires_at FROM oauth_codes WHERE code = ?`
+    )
+      .bind(code)
+      .first<{ client_id: string; redirect_uri: string; code_challenge: string; expires_at: number }>();
+    if (row) await env.DB.prepare(`DELETE FROM oauth_codes WHERE code = ?`).bind(code).run(); // one-time
+    if (!row || row.expires_at < Date.now()) return ojson({ error: "invalid_grant" }, 400);
+    if (row.redirect_uri !== String(form.get("redirect_uri") || ""))
+      return ojson({ error: "invalid_grant", error_description: "redirect_uri mismatch" }, 400);
+    const verifier = String(form.get("code_verifier") || "");
+    if (!verifier || (await sha256b64url(verifier)) !== row.code_challenge)
+      return ojson({ error: "invalid_grant", error_description: "PKCE verification failed" }, 400);
+    return ojson(await issueTokens(env));
+  }
+
+  if (grant === "refresh_token") {
+    if (!(await verifyOAuthToken(env, "rt", String(form.get("refresh_token") || ""))))
+      return ojson({ error: "invalid_grant" }, 400);
+    return ojson(await issueTokens(env));
+  }
+
+  return ojson({ error: "unsupported_grant_type" }, 400);
+}
+
+// ---------------------------------------------------------------------------
 // Entry
 // ---------------------------------------------------------------------------
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    if (url.pathname === "/mcp") return handleMcp(req, env, url);
-    if (url.pathname === "/health") return json({ ok: true, service: SERVER_INFO });
-    if (url.pathname === "/login")
-      return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
-    if (url.pathname === "/logout") return handleLogout();
-    if (url.pathname === "/search") return handleSearch(req, env, url);
-    if (url.pathname === "/activity") return handleActivity(req, env, url);
+    const p = url.pathname;
+    if (p === "/mcp") return handleMcp(req, env, url);
+    if (p === "/health") return json({ ok: true, service: SERVER_INFO });
+
+    // OAuth discovery + endpoints (public)
+    if (p.startsWith("/.well-known/oauth-authorization-server") || p.startsWith("/.well-known/openid-configuration"))
+      return ojson(oauthASMetadata(url.origin));
+    if (p.startsWith("/.well-known/oauth-protected-resource")) return ojson(oauthPRMetadata(url.origin));
+    if (p === "/register") return handleRegister(req, env);
+    if (p === "/authorize") return req.method === "POST" ? handleAuthorizePost(req, env) : handleAuthorizeGet(req, env, url);
+    if (p === "/token") return handleToken(req, env);
+
+    // Web reader
+    if (p === "/login") return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
+    if (p === "/logout") return handleLogout();
+    if (p === "/search") return handleSearch(req, env, url);
+    if (p === "/activity") return handleActivity(req, env, url);
     return handleReader(req, env, url);
   },
 };

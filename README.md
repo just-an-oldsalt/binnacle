@@ -14,13 +14,26 @@ read it on the web. One Cloudflare Worker + D1. No heavy interface, no Confluenc
 - ✅ **Phase 2** — web reader (`/login` cookie + rendered tree, breadcrumbs, light/dark)
 - ✅ **Phase 4** — full-text search (FTS5): sidebar box, `/search`, `search` MCP tool
 - ✅ **Phase 3** — revision history + diff view (`?history`/`?v`/`?diff`) + `/activity` feed
-- ⬜ Polish — manual sort ordering, custom domain, backup mirror
+- ✅ **OAuth** — self-contained OAuth 2.1 server so the Claude mobile app / claude.ai can
+  connect as a Connector; login credential is `AUTH_TOKEN`. Claude Code still uses the raw
+  bearer token via header.
+- ⬜ Polish — manual sort ordering, backup mirror
 
-### Reader routes
+### Connecting clients
 
-`/` home · `/<path>` a page · `/<path>?history=1` versions · `/<path>?v=N` an old
-version · `/<path>?diff=N` diff vs current · `/search?q=` · `/activity` · `/login` · `/logout`.
-Reserved top-level slugs (shadowed by routes): `mcp`, `health`, `login`, `logout`, `search`, `activity`.
+- **Claude Code (desktop):** `claude mcp add --scope user --transport http binnacle
+  https://binnacle.dort.zone/mcp --header "Authorization: Bearer <AUTH_TOKEN>"`
+- **Claude mobile app / claude.ai:** add a custom connector for `https://binnacle.dort.zone/mcp`.
+  It runs the OAuth flow → a Binnacle login page → paste your `AUTH_TOKEN` → connected.
+
+### Routes
+
+Reader: `/` · `/<path>` · `/<path>?history=1` · `?v=N` · `?diff=N` · `/search?q=` · `/activity`
+· `/login` · `/logout`.
+OAuth: `/.well-known/oauth-authorization-server` · `/.well-known/oauth-protected-resource`
+· `/register` · `/authorize` · `/token`.
+Reserved top-level slugs (shadowed by routes): `mcp`, `health`, `login`, `logout`, `search`,
+`activity`, `authorize`, `token`, `register`.
 
 ## One-time setup
 
