@@ -774,6 +774,15 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.mu
 .results .crumb-sm{font-size:.78rem;color:var(--muted);margin:2px 0}
 .results .snip{margin:.3em 0 0;font-size:.92rem;color:var(--fg)}
 .results mark{background:var(--accent);color:#fff;padding:0 2px;border-radius:3px}
+.side-link{display:block;margin-top:14px;font-size:.85rem;color:var(--muted)}
+.rev-banner{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:.9rem;margin-bottom:22px}
+.history{list-style:none;padding-left:0}
+.history li{padding:8px 0;border-bottom:1px solid var(--border);font-size:.92rem}
+.badge{display:inline-block;background:var(--code-bg);border:1px solid var(--border);border-radius:5px;padding:0 6px;font-size:.76rem;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;margin-right:6px}
+.history .cur{color:var(--accent);font-weight:600;margin-right:4px}
+pre.diff{background:var(--code-bg);padding:14px 16px;border-radius:8px;overflow-x:auto;white-space:pre-wrap;word-break:break-word;font-size:.85rem;line-height:1.7;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre.diff del{background:rgba(220,38,38,.18);color:#e5484d;text-decoration:line-through}
+pre.diff ins{background:rgba(22,163,74,.20);color:#2fa84f;text-decoration:none}
 .login-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:24px}
 .login-card{width:100%;max-width:360px;text-align:center}.login-card h1{font-size:1.5rem;margin-bottom:8px}
 .login-card form{margin-top:20px;display:flex;flex-direction:column;gap:12px}
@@ -812,7 +821,7 @@ function renderNav(
 }
 
 function renderSidebar(navHtml: string, query = ""): string {
-  return `<a class="brand" href="/">🧭 Binnacle</a><form class="search" action="/search" method="get"><input type="search" name="q" placeholder="Search…" value="${esc(query)}" aria-label="Search"></form><details class="navwrap" open><summary>Pages</summary><nav class="tree">${navHtml || '<p class="muted">No pages yet</p>'}</nav></details><a class="logout" href="/logout">Log out</a>`;
+  return `<a class="brand" href="/">🧭 Binnacle</a><form class="search" action="/search" method="get"><input type="search" name="q" placeholder="Search…" value="${esc(query)}" aria-label="Search"></form><details class="navwrap" open><summary>Pages</summary><nav class="tree">${navHtml || '<p class="muted">No pages yet</p>'}</nav></details><a class="side-link" href="/activity">Activity</a><a class="logout" href="/logout">Log out</a>`;
 }
 
 function breadcrumb(byId: Map<string, PageRow>, current: PageRow): string {
@@ -828,6 +837,153 @@ function breadcrumb(byId: Map<string, PageRow>, current: PageRow): string {
       : `<a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a>`
   );
   return `<a href="/">Home</a><span class="sep">/</span>` + parts.join('<span class="sep">/</span>');
+}
+
+// --- revision / activity data + rendering ----------------------------------
+
+interface RevRow {
+  version: number;
+  title: string;
+  content_html: string;
+  summary: string | null;
+  created_at: string;
+}
+
+async function getRevision(env: Env, pageId: string, version: number): Promise<RevRow | null> {
+  return await env.DB.prepare(
+    `SELECT version, title, content_html, summary, created_at FROM revisions WHERE page_id = ? AND version = ?`
+  )
+    .bind(pageId, version)
+    .first<RevRow>();
+}
+
+async function listRevisionRows(env: Env, pageId: string) {
+  const { results } = await env.DB.prepare(
+    `SELECT version, summary, created_at FROM revisions WHERE page_id = ? ORDER BY version DESC`
+  )
+    .bind(pageId)
+    .all<{ version: number; summary: string | null; created_at: string }>();
+  return results ?? [];
+}
+
+async function recentActivity(env: Env) {
+  const { results } = await env.DB.prepare(
+    `SELECT page_id, version, summary, created_at FROM revisions ORDER BY created_at DESC, version DESC LIMIT 50`
+  ).all<{ page_id: string; version: number; summary: string | null; created_at: string }>();
+  return results ?? [];
+}
+
+// Word/tag-level LCS diff; escapes everything so it renders as safe source.
+function tokenizeForDiff(s: string): string[] {
+  return s.match(/<[^>]+>|[^<\s]+|\s+/g) ?? [];
+}
+
+function diffHtml(oldStr: string, newStr: string): string {
+  const a = tokenizeForDiff(oldStr);
+  const b = tokenizeForDiff(newStr);
+  const CAP = 3000;
+  if (a.length > CAP || b.length > CAP) return esc("(content too large to diff inline)");
+  const n = a.length;
+  const m = b.length;
+  const dp: Uint16Array[] = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  let i = 0;
+  let j = 0;
+  let out = "";
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out += esc(a[i]); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out += `<del>${esc(a[i])}</del>`; i++; }
+    else { out += `<ins>${esc(b[j])}</ins>`; j++; }
+  }
+  while (i < n) out += `<del>${esc(a[i++])}</del>`;
+  while (j < m) out += `<ins>${esc(b[j++])}</ins>`;
+  return out || esc("(no changes)");
+}
+
+function renderPageMain(
+  byId: Map<string, PageRow>,
+  childrenOf: Map<string | null, PageRow[]>,
+  current: PageRow,
+  cpath: string
+): string {
+  const kids = childrenOf.get(current.id) ?? [];
+  let inner: string;
+  if (current.content_html.trim()) {
+    inner = `<div class="prose">${current.content_html}</div>`;
+  } else if (kids.length) {
+    inner = `<div class="prose"><p class="muted">This section has no content of its own.</p><ul class="index">${kids
+      .map((p) => `<li><a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a></li>`)
+      .join("")}</ul></div>`;
+  } else {
+    inner = `<div class="prose"><p class="muted">This page is empty.</p></div>`;
+  }
+  const meta = `<footer class="meta">v${current.version} · updated ${esc(
+    current.updated_at.slice(0, 10)
+  )} · <a href="${esc(cpath)}?history=1">History</a></footer>`;
+  return `<nav class="crumbs">${breadcrumb(byId, current)}</nav>${inner}${meta}`;
+}
+
+async function renderHistoryMain(
+  env: Env,
+  byId: Map<string, PageRow>,
+  current: PageRow,
+  cpath: string
+): Promise<string> {
+  const revs = await listRevisionRows(env, current.id);
+  const currentRow = `<li><span class="badge">v${current.version}</span><span class="cur">current</span> · updated ${esc(
+    current.updated_at.slice(0, 10)
+  )}</li>`;
+  const items = revs
+    .map(
+      (r) =>
+        `<li><span class="badge">v${r.version}</span> ${esc(String(r.created_at).slice(0, 10))}${
+          r.summary ? ` · ${esc(r.summary)}` : ""
+        } · <a href="${esc(cpath)}?v=${r.version}">view</a> · <a href="${esc(cpath)}?diff=${r.version}">diff vs current</a></li>`
+    )
+    .join("");
+  const body = revs.length
+    ? `<ul class="history">${currentRow}${items}</ul>`
+    : `<ul class="history">${currentRow}</ul><p class="muted">No earlier versions yet — edits will show up here.</p>`;
+  return `<nav class="crumbs">${breadcrumb(byId, current)}<span class="sep">/</span><span>History</span></nav><div class="prose"><h1>History</h1><p class="muted">${esc(
+    current.title
+  )}</p></div>${body}<p style="margin-top:24px"><a href="${esc(cpath)}">← Back to page</a></p>`;
+}
+
+async function renderRevisionMain(
+  env: Env,
+  byId: Map<string, PageRow>,
+  current: PageRow,
+  cpath: string,
+  v: number
+): Promise<string> {
+  const rev = await getRevision(env, current.id, v);
+  const crumbs = `<nav class="crumbs">${breadcrumb(byId, current)}<span class="sep">/</span><span>v${v}</span></nav>`;
+  if (!rev) return `${crumbs}<div class="prose"><p class="muted">No such revision.</p></div>`;
+  const banner = `<div class="rev-banner">Viewing <strong>v${rev.version}</strong> from ${esc(
+    String(rev.created_at).slice(0, 10)
+  )} — an old version. <a href="${esc(cpath)}">Back to current</a> · <a href="${esc(cpath)}?diff=${v}">See diff</a></div>`;
+  const content = rev.content_html.trim()
+    ? `<div class="prose">${rev.content_html}</div>`
+    : `<div class="prose"><p class="muted">(empty)</p></div>`;
+  return `${crumbs}${banner}${content}`;
+}
+
+async function renderDiffMain(
+  env: Env,
+  byId: Map<string, PageRow>,
+  current: PageRow,
+  cpath: string,
+  v: number
+): Promise<string> {
+  const rev = await getRevision(env, current.id, v);
+  const crumbs = `<nav class="crumbs">${breadcrumb(byId, current)}<span class="sep">/</span><span>diff v${v}→v${current.version}</span></nav>`;
+  if (!rev) return `${crumbs}<div class="prose"><p class="muted">No such revision.</p></div>`;
+  const banner = `<div class="rev-banner">Diff: <strong>v${rev.version}</strong> → <strong>v${current.version}</strong> (current). <a href="${esc(
+    cpath
+  )}">Back to current</a></div>`;
+  return `${crumbs}${banner}<pre class="diff">${diffHtml(rev.content_html, current.content_html)}</pre>`;
 }
 
 async function handleReader(req: Request, env: Env, url: URL): Promise<Response> {
@@ -874,19 +1030,19 @@ async function handleReader(req: Request, env: Env, url: URL): Promise<Response>
       : `<p class="muted">No pages yet — create one with the MCP.</p>`;
     main = `<nav class="crumbs"><span>Home</span></nav><div class="prose"><h1>🧭 Binnacle</h1><p class="muted">A tree wiki. Pick a page from the sidebar.</p></div>${list}`;
   } else {
-    const kids = childrenOf.get(current.id) ?? [];
-    let inner: string;
-    if (current.content_html.trim()) {
-      inner = `<div class="prose">${current.content_html}</div>`;
-    } else if (kids.length) {
-      inner = `<div class="prose"><p class="muted">This section has no content of its own.</p><ul class="index">${kids
-        .map((p) => `<li><a href="${esc(fullPath(byId, p.id))}">${esc(p.title)}</a></li>`)
-        .join("")}</ul></div>`;
+    const cpath = fullPath(byId, current.id);
+    const sp = url.searchParams;
+    const vParam = sp.get("v");
+    const diffParam = sp.get("diff");
+    if (vParam && Number.isFinite(Number(vParam))) {
+      main = await renderRevisionMain(env, byId, current, cpath, Number(vParam));
+    } else if (diffParam && Number.isFinite(Number(diffParam))) {
+      main = await renderDiffMain(env, byId, current, cpath, Number(diffParam));
+    } else if (sp.has("history")) {
+      main = await renderHistoryMain(env, byId, current, cpath);
     } else {
-      inner = `<div class="prose"><p class="muted">This page is empty.</p></div>`;
+      main = renderPageMain(byId, childrenOf, current, cpath);
     }
-    const meta = `<footer class="meta">v${current.version} · updated ${esc(current.updated_at.slice(0, 10))}</footer>`;
-    main = `<nav class="crumbs">${breadcrumb(byId, current)}</nav>${inner}${meta}`;
   }
 
   return htmlResponse(pageShell(current?.title ?? "Home", renderSidebar(nav), main));
@@ -935,6 +1091,30 @@ async function handleSearch(req: Request, env: Env, url: URL): Promise<Response>
   return htmlResponse(pageShell("Search", renderSidebar(nav, q), main));
 }
 
+async function handleActivity(req: Request, env: Env, url: URL): Promise<Response> {
+  if (!(await hasValidSession(req, env)))
+    return Response.redirect(new URL("/login", url).toString(), 302);
+  const acts = await recentActivity(env);
+  const pages = await loadAllPages(env);
+  const { byId, childrenOf } = buildIndex(pages);
+  const nav = renderNav(childrenOf, byId, null, new Set(), null);
+  const items = acts
+    .filter((a) => byId.has(a.page_id))
+    .map((a) => {
+      const p = byId.get(a.page_id)!;
+      const path = fullPath(byId, p.id);
+      const when = esc(String(a.created_at).slice(0, 16).replace("T", " "));
+      return `<li><span class="badge">v${a.version}</span> ${when} · <a href="${esc(path)}">${esc(
+        p.title
+      )}</a>${a.summary ? ` — ${esc(a.summary)}` : ""}</li>`;
+    })
+    .join("");
+  const main = `<div class="prose"><h1>Activity</h1><p class="muted">Recent edits across all pages. Each row is the version that was superseded.</p></div><ul class="history">${
+    items || '<li class="muted">No activity yet.</li>'
+  }</ul>`;
+  return htmlResponse(pageShell("Activity", renderSidebar(nav), main));
+}
+
 function loginPage(error?: string): Response {
   const body = `<div class="login-wrap"><div class="login-card"><h1>🧭 Binnacle</h1><p class="muted">Enter your access token</p><form method="post" action="/login"><input type="password" name="token" placeholder="Access token" autofocus autocomplete="current-password"><button type="submit">Enter</button></form>${
     error ? `<p class="err">${esc(error)}</p>` : ""
@@ -980,6 +1160,7 @@ export default {
       return req.method === "POST" ? handleLoginPost(req, env) : loginPage();
     if (url.pathname === "/logout") return handleLogout();
     if (url.pathname === "/search") return handleSearch(req, env, url);
+    if (url.pathname === "/activity") return handleActivity(req, env, url);
     return handleReader(req, env, url);
   },
 };

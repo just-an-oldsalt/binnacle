@@ -10,10 +10,17 @@ read it on the web. One Cloudflare Worker + D1. No heavy interface, no Confluenc
 
 ## Status
 
-- ✅ **Phase 1** — MCP server + D1 schema (this commit)
-- ⬜ Phase 2 — web reader (`/login` cookie + rendered tree)
-- ⬜ Phase 3 — revision UI / activity
-- ⬜ Phase 4 — search, breadcrumbs, dark-mode polish
+- ✅ **Phase 1** — MCP server + D1 schema
+- ✅ **Phase 2** — web reader (`/login` cookie + rendered tree, breadcrumbs, light/dark)
+- ✅ **Phase 4** — full-text search (FTS5): sidebar box, `/search`, `search` MCP tool
+- ✅ **Phase 3** — revision history + diff view (`?history`/`?v`/`?diff`) + `/activity` feed
+- ⬜ Polish — manual sort ordering, custom domain, backup mirror
+
+### Reader routes
+
+`/` home · `/<path>` a page · `/<path>?history=1` versions · `/<path>?v=N` an old
+version · `/<path>?diff=N` diff vs current · `/search?q=` · `/activity` · `/login` · `/logout`.
+Reserved top-level slugs (shadowed by routes): `mcp`, `health`, `login`, `logout`, `search`, `activity`.
 
 ## One-time setup
 
