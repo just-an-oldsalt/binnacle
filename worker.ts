@@ -814,6 +814,10 @@ a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}.mu
 .prose .tags{display:flex;flex-wrap:wrap;gap:6px;padding:0;list-style:none;margin:12px 0}
 .prose .tag{font-size:.76rem;padding:2px 9px;border-radius:6px;background:var(--code-bg);border:1px solid var(--border);color:var(--muted)}
 .prose .lead{font-size:1.1rem;color:var(--muted);margin:0 0 18px}
+.prose .st{display:inline-block;font-size:.72rem;font-weight:600;padding:1px 9px;border-radius:999px;border:1px solid var(--border);white-space:nowrap}
+.prose .st.ok{color:var(--success);background:color-mix(in srgb,var(--success) 12%,var(--bg));border-color:color-mix(in srgb,var(--success) 35%,var(--bg))}
+.prose .st.need{color:var(--warn);background:color-mix(in srgb,var(--warn) 14%,var(--bg));border-color:color-mix(in srgb,var(--warn) 35%,var(--bg))}
+.prose .st.crit{color:var(--danger);background:color-mix(in srgb,var(--danger) 13%,var(--bg));border-color:color-mix(in srgb,var(--danger) 38%,var(--bg))}
 
 .side-link{display:block;margin-top:14px;font-size:.85rem;color:var(--muted)}
 .rev-banner{background:var(--code-bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-size:.9rem;margin-bottom:22px}
