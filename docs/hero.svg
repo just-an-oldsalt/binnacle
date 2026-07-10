@@ -1,0 +1,97 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675" viewBox="0 0 1200 675" font-family="'DM Sans','Segoe UI',system-ui,-apple-system,sans-serif" role="img" aria-label="Binnacle reader: a tree wiki with live, interactive pages authored by Claude">
+  <defs>
+    <linearGradient id="heroGlow" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a1c14"/>
+      <stop offset="1" stop-color="#0d0e0f"/>
+    </linearGradient>
+    <linearGradient id="accentBar" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e8ff00"/>
+      <stop offset="0.7" stop-color="#e8ff00" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="18" flood-color="#000" flood-opacity="0.5"/>
+    </filter>
+  </defs>
+
+  <!-- backdrop -->
+  <rect width="1200" height="675" fill="#0d0e0f"/>
+  <rect width="1200" height="675" fill="url(#heroGlow)" opacity="0.6"/>
+
+  <!-- window frame -->
+  <g filter="url(#soft)">
+    <rect x="40" y="40" width="1120" height="560" rx="16" fill="#111214" stroke="rgba(255,255,255,0.08)"/>
+    <rect x="40" y="40" width="1120" height="44" rx="16" fill="#141517"/>
+    <rect x="40" y="70" width="1120" height="14" fill="#141517"/>
+    <circle cx="66" cy="62" r="6" fill="#ff6b6b"/>
+    <circle cx="88" cy="62" r="6" fill="#ffb84d"/>
+    <circle cx="110" cy="62" r="6" fill="#4cff91"/>
+    <rect x="300" y="52" width="600" height="20" rx="10" fill="#0d0e0f"/>
+    <text x="600" y="66" text-anchor="middle" fill="#8a8f88" font-size="12" font-family="ui-monospace,Menlo,monospace">binnacle.your-subdomain.workers.dev</text>
+
+    <!-- sidebar -->
+    <rect x="40" y="84" width="270" height="516" fill="#141517"/>
+    <text x="66" y="132" fill="#e8ff00" font-size="26" font-weight="700" letter-spacing="2">🧭 BINNACLE</text>
+    <rect x="66" y="150" width="218" height="34" rx="9" fill="#17181a" stroke="rgba(255,255,255,0.14)"/>
+    <text x="82" y="172" fill="#8a8f88" font-size="13">Search…</text>
+
+    <!-- tree -->
+    <text x="70" y="214" fill="#eef0ec" font-size="14.5">▾ Projects</text>
+    <rect x="84" y="224" width="200" height="28" rx="7" fill="rgba(232,255,0,0.13)"/>
+    <rect x="84" y="224" width="2" height="28" fill="#e8ff00"/>
+    <text x="98" y="243" fill="#e8ff00" font-size="14.5" font-weight="600">Deck rebuild</text>
+    <text x="98" y="277" fill="#eef0ec" font-size="14.5">Germany trip</text>
+    <text x="70" y="311" fill="#eef0ec" font-size="14.5">▸ Personal</text>
+    <text x="70" y="345" fill="#eef0ec" font-size="14.5">▸ Docs</text>
+    <line x1="66" y1="372" x2="284" y2="372" stroke="rgba(255,255,255,0.07)"/>
+    <text x="70" y="400" fill="#8a8f88" font-size="13">Activity</text>
+    <text x="70" y="426" fill="#8a8f88" font-size="13">Log out</text>
+
+    <!-- main content -->
+    <text x="342" y="126" fill="#8a8f88" font-size="11.5" letter-spacing="1">HOME / PROJECTS / DECK REBUILD</text>
+    <rect x="342" y="146" width="770" height="120" rx="16" fill="#161811" stroke="rgba(255,255,255,0.07)"/>
+    <rect x="342" y="146" width="300" height="2" fill="url(#accentBar)"/>
+    <text x="368" y="212" fill="#e8ff00" font-size="46" font-weight="700" letter-spacing="1">DECK REBUILD</text>
+    <text x="370" y="242" fill="#8a8f88" font-size="13" letter-spacing="1">CEDAR · 16×20 · TARGET: LABOUR DAY WEEKEND</text>
+
+    <!-- stat tiles -->
+    <g>
+      <rect x="342" y="286" width="182" height="70" rx="12" fill="#17181a" stroke="rgba(255,255,255,0.07)"/>
+      <text x="360" y="326" fill="#e8ff00" font-size="30" font-weight="700">$2.4k</text>
+      <text x="360" y="344" fill="#8a8f88" font-size="10.5" letter-spacing="1">MATERIALS BUDGET</text>
+      <rect x="536" y="286" width="182" height="70" rx="12" fill="#17181a" stroke="rgba(255,255,255,0.07)"/>
+      <text x="554" y="326" fill="#e8ff00" font-size="30" font-weight="700">3 / 7</text>
+      <text x="554" y="344" fill="#8a8f88" font-size="10.5" letter-spacing="1">PERMIT STEPS DONE</text>
+      <rect x="730" y="286" width="182" height="70" rx="12" fill="#17181a" stroke="rgba(255,255,255,0.07)"/>
+      <text x="748" y="326" fill="#e8ff00" font-size="30" font-weight="700">Sep 5</text>
+      <text x="748" y="344" fill="#8a8f88" font-size="10.5" letter-spacing="1">POUR FOOTINGS</text>
+    </g>
+
+    <!-- live checklist card -->
+    <rect x="342" y="374" width="770" height="196" rx="14" fill="#141517" stroke="rgba(255,255,255,0.07)"/>
+    <text x="366" y="408" fill="#eef0ec" font-size="15" font-weight="600">Permit checklist</text>
+    <text x="900" y="408" fill="#4cff91" font-size="11.5" letter-spacing="1">● SYNCED</text>
+
+    <!-- checked item -->
+    <rect x="366" y="424" width="19" height="19" rx="5" fill="rgba(76,255,145,0.2)" stroke="#4cff91"/>
+    <polyline points="371,434 375,438 381,429" fill="none" stroke="#4cff91" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="398" y="439" fill="#8a8f88" font-size="14" text-decoration="line-through">Submit zoning application</text>
+    <!-- checked item -->
+    <rect x="366" y="456" width="19" height="19" rx="5" fill="rgba(76,255,145,0.2)" stroke="#4cff91"/>
+    <polyline points="371,466 375,470 381,461" fill="none" stroke="#4cff91" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="398" y="471" fill="#8a8f88" font-size="14">Pay permit fee</text>
+    <!-- unchecked -->
+    <rect x="366" y="488" width="19" height="19" rx="5" fill="none" stroke="rgba(255,255,255,0.24)"/>
+    <text x="398" y="503" fill="#eef0ec" font-size="14">Schedule footing inspection</text>
+    <!-- unchecked -->
+    <rect x="366" y="520" width="19" height="19" rx="5" fill="none" stroke="rgba(255,255,255,0.24)"/>
+    <text x="398" y="535" fill="#eef0ec" font-size="14">Final inspection &amp; sign-off</text>
+
+    <text x="366" y="562" fill="#8a8f88" font-size="12" font-style="italic">Ticked on your phone → logged to D1 → Claude reads it back.</text>
+  </g>
+
+  <!-- caption -->
+  <text x="600" y="640" text-anchor="middle" fill="#8a8f88" font-size="15">
+    <tspan fill="#eef0ec" font-weight="600">Claude writes the page.</tspan>
+    <tspan dx="6">You read it anywhere, tick things off, and it stays in sync.</tspan>
+  </text>
+</svg>

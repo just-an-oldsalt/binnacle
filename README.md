@@ -13,14 +13,18 @@ it fits inside Cloudflare's free tier.
 [![MCP](https://img.shields.io/badge/Model_Context_Protocol-server-5A67D8)](https://modelcontextprotocol.io/)
 [![Runs free](https://img.shields.io/badge/hosting-free%20tier-4cff91.svg)](#-it-runs-on-the-free-tier)
 
-</div>
+<br>
+
+<img src="docs/hero.svg" alt="The Binnacle reader: a tree wiki of live, interactive pages that Claude authors for you" width="880">
 
 <!--
-  MAINTAINER: drop a screen recording here — it sells the whole thing in five seconds.
-  Show: "Claude, add a page tracking my Germany trip" → a rich page appears → tick a
-  checkbox in the reader → ask Claude "what did I check off?" and it reads the log back.
-  ![Binnacle demo](docs/demo.gif)
+  MAINTAINER: docs/hero.svg is a placeholder poster. A 5–10s screen recording sells
+  this far better — record the loop, save it as docs/demo.gif, and swap the line
+  above for:  <img src="docs/demo.gif" alt="Binnacle demo" width="880">
+  See docs/README.md for the how-to.
 -->
+
+</div>
 
 ---
 
