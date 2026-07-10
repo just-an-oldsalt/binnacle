@@ -1,0 +1,11 @@
+# Local development secrets for `npm run dev` (wrangler dev).
+# Copy this file to `.dev.vars` (which is gitignored) and set a token.
+#
+#   cp .dev.vars.example .dev.vars
+#
+# In production this value lives as a Worker secret instead (set for you by
+# `npm run setup`, or manually with `npx wrangler secret put AUTH_TOKEN`).
+# It is the single credential for both the MCP and the web reader — use a long
+# random string and keep it in your password manager.
+
+AUTH_TOKEN=dev-token-change-me

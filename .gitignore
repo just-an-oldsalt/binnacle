@@ -15,3 +15,6 @@ npm-debug.log*
 # Wrangler local dev cache + secrets
 .wrangler/
 .dev.vars
+
+# Lavish scratch/preview artifacts
+.lavish/

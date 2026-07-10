@@ -215,9 +215,9 @@ npm run db:migrate       # only after a new migration (wrangler deploy skips mig
 <h2>To do</h2>
 <ul>
   <li>⬜ Manual sort ordering of pages in the sidebar</li>
-  <li>⬜ Custom domain <code>binnacle.dort.zone</code> (parked — cosmetic)</li>
+  <li>⬜ Custom domain (optional — see <code>wrangler.toml</code>)</li>
   <li>⬜ Nightly backup mirror to a private git repo</li>
-  <li>⬜ Migrate the worth-keeping pages over from Confluence</li>
+  <li>⬜ Migrate the worth-keeping pages over from your old wiki</li>
 </ul>
 <blockquote>Add your own ideas here — it's just a page.</blockquote>`
   );
