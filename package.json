@@ -15,8 +15,8 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260711.1",
+    "@cloudflare/workers-types": "^5.20260731.1",
     "typescript": "^7.0.2",
-    "wrangler": "^4.110.0"
+    "wrangler": "^4.118.0"
   }
 }
